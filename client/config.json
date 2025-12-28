@@ -10,8 +10,25 @@
     "sound_down": "assets/deck_ui_slider_down.wav",
     "socket_path": "/tmp/glm_asr_keyboard.sock",
     "default_asr_server": "http://localhost:8000",
+    "asr_backend": "glm",
+    "glm": {
+        "system_prompt": "Transcribe the following Cantonese (\u7cb5\u8a9e) audio."
+    },
+    "sensevoice": {
+        "model_dir": "sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17",
+        "num_threads": 8,
+        "language": "yue",
+        "provider": "cpu"
+    },
+    "whisper": {
+        "device": "cuda",
+        "language": "yue",
+        "task": "transcribe"
+    },
     "use_local_server": true,
     "hotkey": "f12",
-    "system_prompt": "Transcribe the following audio. Preferred language: Cantonese (\u7cb5\u8a9e).",
-    "disable_log": true
+    "disable_log": false,
+    "opencc_convert": "s2t",
+    "language": "zh_TW",
+    "gui_scale": 1.2
 }

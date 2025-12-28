@@ -17,6 +17,7 @@ import wave
 import requests
 import argparse
 import json
+import opencc
 
 def load_config():
     config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
@@ -29,7 +30,8 @@ def load_config():
         "sound_down": "deck_ui_slider_down.wav",
         "socket_path": "/tmp/glm_asr_keyboard.sock",
         "default_asr_server": "http://localhost:8000",
-        "hotkey": "f12"
+        "hotkey": "f12",
+        "gui_scale": 1.0
     }
 
 CONFIG = load_config()
@@ -39,19 +41,31 @@ def save_config(config):
     with open(config_path, 'w') as f:
         json.dump(config, f, indent=4)
 
-def play_sound(path):
+def play_sound(path, wait=False):
     if path:
         # Resolve path relative to project root (one level up from client/)
         project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         full_path = os.path.join(project_root, path)
         if os.path.exists(full_path):
-            subprocess.Popen(["pw-play", full_path], stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
+            if wait:
+                subprocess.run(["pw-play", full_path], stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
+            else:
+                subprocess.Popen(["pw-play", full_path], stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
         else:
             print(f"Warning: Sound file not found: {full_path}")
 
+def set_mute(mute=True):
+    """Mute or unmute the default sink using pactl."""
+    try:
+        state = "1" if mute else "0"
+        subprocess.run(["pactl", "set-sink-mute", "@DEFAULT_SINK@", state], check=False)
+    except Exception as e:
+        print(f"Error setting mute: {e}")
+
 class ASRClient:
-    def __init__(self, asr_server_url):
+    def __init__(self, asr_server_url, config=None):
         self.asr_server_url = asr_server_url
+        self.config = config if config is not None else CONFIG
         print(f"Using ASR server: {self.asr_server_url}")
         
         print("Loading Silero VAD model...")
@@ -62,7 +76,7 @@ class ASRClient:
         self.stop_event = threading.Event()
         self.audio_queue = queue.Queue()
         
-        self.input_device, self.input_sample_rate, self.input_channels = self.find_device(CONFIG.get("audio_devices", []))
+        self.input_device, self.input_sample_rate, self.input_channels = self.find_device(self.config.get("audio_devices", []))
         if self.input_device is None:
             print("Warning: Could not find suitable input device. Using default.")
             self.input_device = None
@@ -114,11 +128,10 @@ class ASRClient:
 
     def send_to_asr(self, audio_data, sample_rate):
         # Get system prompt from config
-        system_prompt = CONFIG.get("system_prompt")
-        headers = {}
-        if system_prompt:
-            headers['X-System-Prompt'] = system_prompt.encode('utf-8')
-
+        backend = self.config.get("asr_backend", "glm")
+        if backend == "sherpa-onnx/sense-voice":
+            backend = "sensevoice"
+        
         # Convert to WAV in memory
         with io.BytesIO() as bio:
             with wave.open(bio, 'wb') as wav_file:
@@ -132,10 +145,34 @@ class ASRClient:
             wav_data = bio.getvalue()
         
         try:
-            response = requests.post(self.asr_server_url, data=wav_data, headers=headers, timeout=10)
+            files = {'audio': ('audio.wav', wav_data, 'audio/wav')}
+            
+            # Prepare data with all settings from the current backend config
+            data = {}
+            backend_config = self.config.get(backend, {})
+            for k, v in backend_config.items():
+                if v is not None:
+                    # If the value is a dict or list, send it as a JSON string
+                    if isinstance(v, (dict, list)):
+                        data[k] = json.dumps(v)
+                    else:
+                        data[k] = str(v)
+                
+            response = requests.post(self.asr_server_url, files=files, data=data, timeout=60)
             if response.status_code == 200:
                 response.encoding = 'utf-8'
-                return response.text
+                text = response.text
+                
+                # Apply OpenCC immediately after receiving server response
+                opencc_mode = self.config.get("opencc_convert")
+                if opencc_mode:
+                    try:
+                        converter = opencc.OpenCC(opencc_mode)
+                        text = converter.convert(text)
+                        print(f"OpenCC converted ({opencc_mode}): {text}")
+                    except Exception as e:
+                        print(f"OpenCC conversion error: {e}")
+                return text
             else:
                 print(f"ASR Error: {response.status_code} - {response.text}")
         except Exception as e:
@@ -150,7 +187,7 @@ class ASRClient:
     def recording_loop(self):
         VAD_SAMPLE_RATE = 16000
         FRAME_DURATION_MS = 32
-        PADDING_DURATION_MS = 320
+        PADDING_DURATION_MS = 640
         max_silent_frames = int(PADDING_DURATION_MS / FRAME_DURATION_MS)
 
         while not self.stop_event.is_set():
@@ -164,12 +201,21 @@ class ASRClient:
                 continue
                 
             self.is_recording_dict["internal_active"] = True
-            print("Triggered! VAD Listening...")
-            play_sound(CONFIG.get("sound_up"))
+            print("Triggered! Playing sound...")
+            play_sound(self.config.get("sound_up"), wait=True)
+            set_mute(True)
+            # Wait a bit for the system to actually mute and for any residual audio to clear
+            time.sleep(0.1)
+            print("Muted. VAD Listening...")
             
             recorded_audio = []
             num_silent_frames = 0
-            while not self.audio_queue.empty(): self.audio_queue.get()
+            # Clear queue AFTER muting to ensure no pre-mute audio is processed
+            while not self.audio_queue.empty():
+                try:
+                    self.audio_queue.get_nowait()
+                except queue.Empty:
+                    break
             active = False
             speech_detected = False
             
@@ -233,10 +279,11 @@ class ASRClient:
             self.is_recording_dict["internal_active"] = False
             self.is_recording_dict["cancel"] = False
             print("Recording cycle finished. Waiting for next trigger.")
-            play_sound(CONFIG.get("sound_down"))
+            play_sound(self.config.get("sound_down"))
+            set_mute(False)
 
     def socket_listener(self):
-        socket_path = CONFIG.get("socket_path", "/tmp/glm_asr_keyboard.sock")
+        socket_path = self.config.get("socket_path", "/tmp/glm_asr_keyboard.sock")
         if os.path.exists(socket_path):
             os.remove(socket_path)
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
@@ -282,30 +329,75 @@ class ASRClient:
 
     def start_keyboard_subprocess(self):
         print("Starting keyboard listener with sudo...")
-        hotkey = CONFIG.get("hotkey", "f12")
+        hotkey = self.config.get("hotkey", "f12")
         cmd = ["sudo", sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "keyboard_listener.py"), "--hotkey", hotkey]
-        proc = subprocess.Popen(cmd)
-        
-        def cleanup_keyboard():
-            print("\nCleaning up keyboard listener...")
-            subprocess.run(["sudo", "kill", str(proc.pid)], stderr=subprocess.DEVNULL)
-            proc.terminate()
-        
-        atexit.register(cleanup_keyboard)
-        return proc
+        # Suppress stderr to avoid "No such device" tracebacks on exit
+        self.keyboard_proc = subprocess.Popen(cmd, stderr=subprocess.DEVNULL)
+        return self.keyboard_proc
 
     def start_local_server(self):
         print("Starting local ASR server...")
         server_script = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "server", "server.py")
-        cmd = [sys.executable, server_script]
-        proc = subprocess.Popen(cmd)
+        backend = self.config.get("asr_backend", "glm")
         
-        def cleanup_server():
-            print("\nCleaning up local ASR server...")
-            proc.terminate()
+        # Pass the current in-memory CONFIG as a JSON string to the server
+        # This avoids overwriting config.json while ensuring the server uses latest UI settings
+        cmd = [sys.executable, server_script, "--backend", backend, "--config-json", json.dumps(self.config)]
+        self.server_proc = subprocess.Popen(cmd)
+        return self.server_proc
+
+    def stop(self):
+        print("Stopping ASRClient...")
+        self.stop_event.set()
         
-        atexit.register(cleanup_server)
-        return proc
+        # Ensure unmuted on stop
+        set_mute(False)
+
+        # Cleanup socket
+        socket_path = self.config.get("socket_path", "/tmp/glm_asr_keyboard.sock")
+        if os.path.exists(socket_path):
+            try:
+                os.remove(socket_path)
+            except:
+                pass
+
+        # Close uinput device
+        if hasattr(self, 'uinput_device') and self.uinput_device:
+            try:
+                # python-uinput devices don't have a close method, 
+                # but they are closed when the object is deleted.
+                del self.uinput_device
+            except:
+                pass
+
+        if hasattr(self, 'keyboard_proc') and self.keyboard_proc:
+            print("Cleaning up keyboard listener...")
+            try:
+                # Use sudo kill -9 to be more aggressive if needed, 
+                # but first try regular kill to allow for some cleanup
+                subprocess.run(["sudo", "kill", "-TERM", str(self.keyboard_proc.pid)], stderr=subprocess.DEVNULL)
+                # Also kill by name just in case pid tracking failed or it spawned children
+                subprocess.run(["sudo", "pkill", "-f", "keyboard_listener.py"], stderr=subprocess.DEVNULL)
+                self.keyboard_proc.terminate()
+                try:
+                    self.keyboard_proc.wait(timeout=1)
+                except subprocess.TimeoutExpired:
+                    subprocess.run(["sudo", "kill", "-9", str(self.keyboard_proc.pid)], stderr=subprocess.DEVNULL)
+            except:
+                pass
+            self.keyboard_proc = None
+
+        if hasattr(self, 'server_proc') and self.server_proc:
+            print("Cleaning up local ASR server...")
+            try:
+                self.server_proc.terminate()
+                try:
+                    self.server_proc.wait(timeout=1)
+                except subprocess.TimeoutExpired:
+                    self.server_proc.kill()
+            except:
+                pass
+            self.server_proc = None
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="GLM-ASR Client")

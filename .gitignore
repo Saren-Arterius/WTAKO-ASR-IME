@@ -8,3 +8,11 @@ wheels/
 
 # Virtual environments
 .venv
+
+# ???
+pyproject.toml
+uv.lock
+uv.*.lock
+
+# Models
+sherpa-onnx-sense-voice*/

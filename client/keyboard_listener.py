@@ -37,9 +37,15 @@ def main():
     keyboard.hook_key(hotkey, on_hotkey)
     
     try:
-        keyboard.wait()
-    except KeyboardInterrupt:
+        while True:
+            time.sleep(1)
+    except (KeyboardInterrupt, EOFError, OSError):
         pass
+    finally:
+        try:
+            keyboard.unhook_all()
+        except:
+            pass
 
 if __name__ == "__main__":
     main()
