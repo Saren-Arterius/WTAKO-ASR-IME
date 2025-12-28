@@ -9,10 +9,10 @@
     "sound_up": "assets/deck_ui_slider_up.wav",
     "sound_down": "assets/deck_ui_slider_down.wav",
     "socket_path": "/tmp/glm_asr_keyboard.sock",
-    "default_asr_server": "http://localhost:8000",
-    "asr_backend": "sherpa-onnx/sense-voice",
+    "default_asr_server": "http://100.64.0.2:8000",
+    "asr_backend": "whisper",
     "glm": {
-        "system_prompt": "Transcribe the following Cantonese (\u7cb5\u8a9e) audio."
+        "system_prompt": "Transcribe the following Cantonese (粵語) audio."
     },
     "sensevoice": {
         "model_dir": "sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17",
@@ -20,7 +20,28 @@
         "language": "yue",
         "provider": "cpu",
         "extra_replace": {
-            "繫": "係"
+            "繫": "係",
+            "系": "係",
+            "係統": "系統",
+            "聯係": "聯繫",
+            "係列": "系列",
+            "體係": "體系",
+            "派係": "派系",
+            "學係": "學系",
+            "維係": "維繫",
+            "關係": "關係",
+            "世係": "世系",
+            "直係": "直系",
+            "旁係": "旁系",
+            "根係": "根系",
+            "星係": "星系",
+            "語係": "語系",
+            "父係": "父系",
+            "母係": "母系",
+            "山係": "山系",
+            "森係": "森系",
+            "治癒係": "治癒系",
+            "佛係": "佛系"
         }
     },
     "whisper": {
