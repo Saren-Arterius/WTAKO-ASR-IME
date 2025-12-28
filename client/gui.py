@@ -679,11 +679,9 @@ class ASRGui(ctk.CTk):
         print("Config saved.")
 
     def start_client(self):
-        if not self.use_custom_url.get():
-            server_url = self.config.get("default_asr_server", "http://localhost:8000")
-        else:
-            server_url = self.server_entry.get()
-            
+        # Update config from UI before starting
+        self.update_config_from_ui()
+        
         device_str = self.device_option.get()
         if not device_str or ":" not in device_str:
             self.transition_to(AppState.ERROR, self.i18n.get("no_device_selected", "No device selected"))
@@ -701,7 +699,6 @@ class ASRGui(ctk.CTk):
         # Update config in memory
         self.config["hotkey"] = hotkey
         self.config["asr_backend"] = backend
-        self.config["default_asr_server"] = server_url
         
         if "glm" not in self.config:
             self.config["glm"] = {}
@@ -724,12 +721,12 @@ class ASRGui(ctk.CTk):
 
         self.transition_to(AppState.STARTING)
 
-        self.client_thread = threading.Thread(target=self.run_client, args=(server_url, device_id), daemon=True)
+        self.client_thread = threading.Thread(target=self.run_client, args=(device_id,), daemon=True)
         self.client_thread.start()
 
-    def run_client(self, server_url, device_id):
+    def run_client(self, device_id):
         try:
-            self.client = ASRClient(server_url, config=self.config)
+            self.client = ASRClient(config=self.config)
             # Override device from UI
             try:
                 dev_info = sd.query_devices(device_id)

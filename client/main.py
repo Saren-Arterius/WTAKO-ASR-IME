@@ -63,9 +63,15 @@ def set_mute(mute=True):
         print(f"Error setting mute: {e}")
 
 class ASRClient:
-    def __init__(self, asr_server_url, config=None):
-        self.asr_server_url = asr_server_url
+    def __init__(self, config=None):
         self.config = config if config is not None else CONFIG
+        
+        # Determine ASR server URL from config
+        if self.config.get("use_local_server"):
+            self.asr_server_url = "http://localhost:8000"
+        else:
+            self.asr_server_url = self.config.get("default_asr_server", "http://localhost:8000")
+            
         print(f"Using ASR server: {self.asr_server_url}")
         
         print("Loading Silero VAD model...")
@@ -409,18 +415,19 @@ class ASRClient:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="GLM-ASR Client")
-    parser.add_argument("--asr-server", type=str, help="ASR server URL (if not provided, starts local server)")
+    parser.add_argument("--asr-server", type=str, help="ASR server URL (overrides config)")
     args = parser.parse_args()
 
-    server_url = args.asr_server
-    local_server_proc = None
-    if not server_url:
-        server_url = CONFIG.get("default_asr_server", "http://localhost:8000")
-        client = ASRClient(server_url)
-        local_server_proc = client.start_local_server()
+    # Update CONFIG if command line argument is provided
+    if args.asr_server:
+        CONFIG["default_asr_server"] = args.asr_server
+        CONFIG["use_local_server"] = False
+    
+    client = ASRClient(CONFIG)
+    
+    if CONFIG.get("use_local_server"):
+        client.start_local_server()
         # Give the server a moment to start
         time.sleep(2)
-    else:
-        client = ASRClient(server_url)
         
     client.start()
