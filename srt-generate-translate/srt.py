@@ -303,8 +303,9 @@ def transcribe_one(client, i, ts, wav_tensor, total):
         import re
         text = re.sub(r'<\|.*?\|>', '', text).strip()
 
-        # Check for repeating characters (e.g., "aaaaaaaaaa...")
-        if len(text) > 10 and len(set(text)) == 1:
+        # Check for repeating characters (e.g., "aaaaaaaaaa..." or "うおおおお...")
+        import re
+        if len(text) > 10 and re.search(r'(.)\1{9,}', text):
             print(
                 f"Warning: Segment {i+1} contains repeating characters. Cropping to 10 chars.")
             text = text[:10]
@@ -341,8 +342,9 @@ def transcribe_one(client, i, ts, wav_tensor, total):
         )
         text = results[0].text.strip()
 
-        # Check for repeating characters (e.g., "aaaaaaaaaa...")
-        if len(text) > 10 and len(set(text)) == 1:
+        # Check for repeating characters (e.g., "aaaaaaaaaa..." or "うおおおお...")
+        import re
+        if len(text) > 10 and re.search(r'(.)\1{9,}', text):
             print(
                 f"Warning: Segment {i+1} contains repeating characters. Cropping to 10 chars.")
             text = text[:10]
@@ -396,8 +398,9 @@ def transcribe_one(client, i, ts, wav_tensor, total):
             text = text.split('<asr_text>')[1].strip()
         text = text.strip()
 
-        # Check for repeating characters (e.g., "aaaaaaaaaa...")
-        if len(text) > 10 and len(set(text)) == 1:
+        # Check for repeating characters (e.g., "aaaaaaaaaa..." or "うおおおお...")
+        import re
+        if len(text) > 10 and re.search(r'(.)\1{9,}', text):
             print(
                 f"Warning: Segment {i+1} contains repeating characters. Cropping to 10 chars.")
             text = text[:10]
