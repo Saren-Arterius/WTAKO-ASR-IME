@@ -58,29 +58,14 @@ A real-time Speech-to-Text (STT) system specifically optimized for **Cantonese**
     **Python Dependencies**:
     This project uses [uv](https://github.com/astral-sh/uv) for fast dependency management.
 
-    **Using Setup Script (Recommended)**:
-    A `setup.sh` script is provided to simplify the process. It automatically handles switching between CUDA and ROCm `pyproject.toml` files and lockfiles.
-
-    ```bash
-    # For NVIDIA (CUDA)
-    ./setup.sh --nvidia
-
-    # For AMD (ROCm 6.4)
-    ./setup.sh --rocm
-    ```
-
-    **Manual Installation (Alternative)**:
-
     **NVIDIA (CUDA)**:
     ```bash
-    cp pyproject.cuda.toml pyproject.toml
-    uv sync --extra cuda
+    uv pip install -r requirements.txt
     ```
 
     **AMD (ROCm)**:
     ```bash
-    cp pyproject.rocm.toml pyproject.toml
-    uv sync --extra rocm
+    uv pip install -r requirements.txt --extra-index-url https://download.pytorch.org/whl/rocm7.2
     ```
 
     *Note: For some AMD GPUs (like RX 680M), you may need to override the GFX version:*
@@ -112,7 +97,7 @@ A real-time Speech-to-Text (STT) system specifically optimized for **Cantonese**
     # Allow running the keyboard listener without a password
     your_username ALL=(ALL) NOPASSWD: /path/to/python /path/to/project/client/keyboard_listener.py *
     ```
-    *Note: You can find your python path by running `which python` or `uv run which python`.*
+    *Note: You can find your python path by running `which python`.*
 
 6.  **Configure**:
     The application will create/update `client/config.json` automatically. You can also edit it manually or via the GUI.
