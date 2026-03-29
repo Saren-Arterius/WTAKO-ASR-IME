@@ -34,7 +34,9 @@ DEFAULT_CONFIG = {
     "appearance_mode": "Dark",
     "video_files": [],
     "context": "",
-    "unload_models_after_use": False
+    "unload_models_after_use": False,
+    "save_debug_srt": False,
+    "save_origin_srt": True
 }
 
 
@@ -249,6 +251,20 @@ class SRTGui(ctk.CTk, TkinterDnD.DnDWrapper if HAS_DND else object):
         self.update_preview_btn.grid(
             row=4, column=1, padx=10, pady=5, sticky="e")
 
+        self.save_debug_srt_var = ctk.BooleanVar(
+            value=self.config.get("save_debug_srt", False))
+        self.save_debug_srt_checkbox = ctk.CTkCheckBox(adv_tab, text="Save Debug SRT (Diarization)",
+                                                       variable=self.save_debug_srt_var)
+        self.save_debug_srt_checkbox.grid(
+            row=5, column=0, columnspan=2, padx=10, pady=5, sticky="w")
+
+        self.save_origin_srt_var = ctk.BooleanVar(
+            value=self.config.get("save_origin_srt", True))
+        self.save_origin_srt_checkbox = ctk.CTkCheckBox(adv_tab, text="Save Original Language SRT",
+                                                        variable=self.save_origin_srt_var)
+        self.save_origin_srt_checkbox.grid(
+            row=6, column=0, columnspan=2, padx=10, pady=5, sticky="w")
+
         # Status & Progress
         self.status_label = ctk.CTkLabel(
             self.main_frame, text="Status: Ready")
@@ -349,9 +365,9 @@ class SRTGui(ctk.CTk, TkinterDnD.DnDWrapper if HAS_DND else object):
         source = self.source_lang.get()
         dest = self.dest_lang.get()
         context = self.context_entry.get()
-        sample_content = "1\n00:00:01,000 --> 00:00:04,000\nこんにちは、元気ですか？"
+        sample_lines = ["こんにちは、元気ですか？"]
         prompt = srt.get_translation_prompt(
-            source, dest, sample_content, context)
+            source, dest, sample_lines, context)
         self.prompt_preview.configure(state="normal")
         self.prompt_preview.delete("0.0", "end")
         self.prompt_preview.insert("0.0", prompt)
@@ -375,7 +391,9 @@ class SRTGui(ctk.CTk, TkinterDnD.DnDWrapper if HAS_DND else object):
                 "appearance_mode": self.appearance_mode_optionemenu.get(),
                 "video_files": self.video_files,
                 "context": self.context_entry.get(),
-                "unload_models_after_use": self.unload_models_var.get()
+                "unload_models_after_use": self.unload_models_var.get(),
+                "save_debug_srt": self.save_debug_srt_var.get(),
+                "save_origin_srt": self.save_origin_srt_var.get()
             })
             save_config(self.config)
             self.update_status("Configuration saved", "green")
@@ -594,15 +612,16 @@ class SRTGui(ctk.CTk, TkinterDnD.DnDWrapper if HAS_DND else object):
                     if diarization_result:
                         timestamps, raw_timestamps = diarization_result
                         # Save raw debug diarization SRT before merging
-                        diarization_srt = f"{base_path}.debug.diarization.srt"
-                        with open(diarization_srt, 'w', encoding='utf-8') as f:
-                            for idx, seg in enumerate(raw_timestamps):
-                                f.write(f"{idx+1}\n")
-                                f.write(
-                                    f"{srt.format_timestamp(seg['start'] / 16000)} --> {srt.format_timestamp(seg['end'] / 16000)}\n")
-                                speaker = seg.get('speaker', 'UNKNOWN')
-                                f.write(
-                                    f"{speaker} (start: {seg['start']}, end: {seg['end']})\n\n")
+                        if self.config.get("save_debug_srt", False):
+                            diarization_srt = f"{base_path}.debug.diarization.srt"
+                            with open(diarization_srt, 'w', encoding='utf-8') as f:
+                                for idx, seg in enumerate(raw_timestamps):
+                                    f.write(f"{idx+1}\n")
+                                    f.write(
+                                        f"{srt.format_timestamp(seg['start'] / 16000)} --> {srt.format_timestamp(seg['end'] / 16000)}\n")
+                                    speaker = seg.get('speaker', 'UNKNOWN')
+                                    f.write(
+                                        f"{speaker} (start: {seg['start']}, end: {seg['end']})\n\n")
                     else:
                         timestamps = None
 
@@ -648,6 +667,14 @@ class SRTGui(ctk.CTk, TkinterDnD.DnDWrapper if HAS_DND else object):
                 self.after(0, lambda: self.tps_label.configure(text=""))
                 srt.translate_srt(source_srt, dest_srt, context,
                                   stats_callback=self.update_tps)
+
+                # Delete original SRT if not requested
+                if not self.config.get("save_origin_srt", True):
+                    try:
+                        if os.path.exists(source_srt):
+                            os.remove(source_srt)
+                    except Exception as e:
+                        print(f"Failed to remove original SRT: {e}")
 
                 self.progress_bar.set((i + 1) / total)
 

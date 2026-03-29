@@ -10,11 +10,12 @@ import opencc
 import wave
 import io
 import base64
+import argparse
 from openai import OpenAI
 from concurrent.futures import ThreadPoolExecutor
 from pyannote.audio import Pipeline
 
-# Configuration
+# Configuration Defaults
 ASR_API_URL = "http://100.64.0.8:8003/v1"
 ASR_MODEL = "Qwen/Qwen3-ASR-1.7B"
 LLM_API_URL = "http://100.64.0.8:8000/v1"
@@ -22,7 +23,14 @@ LLM_MODEL = "Intel/Qwen3-Coder-Next-int4-AutoRound"
 ASR_BACKEND = "openai"  # "openai", "sensevoice", or "qwen_asr"
 SOURCE_LANG = "ja"
 DEST_LANG = "Traditional Chinese (Taiwan/Hong Kong style)"
+MERGE_DURATION = 0.5
 MERGE_DURATION_FORCE = 0.2
+HF_TOKEN = ""
+USE_DIARIZATION = True
+MIN_SPEAKERS = 0
+UNLOAD_MODELS_AFTER_USE = False
+SAVE_DEBUG_SRT = False
+SAVE_ORIGIN_SRT = True
 
 _sensevoice_recognizer = None
 _qwen_asr_model = None
@@ -117,7 +125,6 @@ def get_vad_timestamps(audio_bytes):
 
 
 def merge_short_segments(segments, min_duration=None, force_duration=None):
-    print(segments)
     if min_duration is None:
         # Try to get from config or default
         min_duration = globals().get('MERGE_DURATION', 0.5)
@@ -414,7 +421,7 @@ def save_srt(segments, output_path):
             f.write(f"{seg['text']}\n\n")
 
 
-def get_translation_prompt(source_lang, dest_lang, chunk_content, context=""):
+def get_translation_prompt(source_lang, dest_lang, lines, context=""):
     # Map language codes to names for the prompt
     lang_map = {
         "ja": "Japanese",
@@ -426,25 +433,30 @@ def get_translation_prompt(source_lang, dest_lang, chunk_content, context=""):
     }
     source_name = lang_map.get(source_lang, source_lang)
 
+    # Format lines as a numbered list for the LLM
+    formatted_lines = "\n".join(
+        [f"{i+1}. {line}" for i, line in enumerate(lines)])
+
     prompt = f"""You are an expert translator specializing in {source_name} to {dest_lang} localization.
 
 CRITICAL INSTRUCTIONS:
 1. TRANSLATE ALL {source_name} text into natural, idiomatic {dest_lang}. 
 2. DO NOT leave any {source_name} sentences or phrases untranslated in the output.
-3. Maintain the SRT format (index, timestamps) exactly.
-4. Use {dest_lang} characters and style.
-{f'5. Additional Context/Instructions: {context}' if context else ''}
+3. Maintain the exact same number of lines in the output.
+4. Output ONLY the translated lines, one per line, without the original numbering or timestamps.
+5. Use {dest_lang} characters and style.
+{f'6. Additional Context/Instructions: {context}' if context else ''}
 
-Input {source_name} SRT:
-{chunk_content}
+Input {source_name} lines:
+{formatted_lines}
 
-Output {dest_lang} SRT:"""
+Output {dest_lang} lines:"""
     return prompt
 
 
-def translate_chunk(client, chunk_content, converter, context="", stats_callback=None, chunk_id=0):
+def translate_chunk(client, lines, converter, context="", stats_callback=None, chunk_id=0):
     prompt = get_translation_prompt(
-        SOURCE_LANG, DEST_LANG, chunk_content, context)
+        SOURCE_LANG, DEST_LANG, lines, context)
     try:
         response = client.chat.completions.create(
             model=LLM_MODEL,
@@ -477,110 +489,244 @@ def translate_chunk(client, chunk_content, converter, context="", stats_callback
         return chunk_content.strip()
 
 
+def parse_srt(content):
+    blocks = [b.strip() for b in content.split('\n\n') if b.strip()]
+    parsed = []
+    for block in blocks:
+        lines = block.split('\n')
+        if len(lines) >= 3:
+            index = lines[0]
+            timestamp = lines[1]
+            text = " ".join(lines[2:])
+            parsed.append(
+                {'index': index, 'timestamp': timestamp, 'text': text})
+    return parsed
+
+
 def translate_srt(input_path, output_path, context="", stats_callback=None):
     print(
         f"Translating to {DEST_LANG} (Parallel)... Context: {context if context else 'None'}")
+
+    # Internal stats for CLI display
+    _chunk_stats = {}
+
+    def cli_stats_callback(chunk_id, tokens, duration, translated_blocks, total_blocks, chunk_total_blocks):
+        _chunk_stats[chunk_id] = (tokens, duration, translated_blocks)
+        total_tokens = sum(s[0] for s in _chunk_stats.values())
+        total_translated = sum(s[2] for s in _chunk_stats.values())
+        max_duration = max((s[1] for s in _chunk_stats.values()), default=0)
+
+        if max_duration > 0:
+            tps = total_tokens / max_duration
+            progress = (total_translated / total_blocks) * \
+                100 if total_blocks > 0 else 0
+            sys.stdout.write(
+                f"\rTranslation Progress: {progress:.1f}% | {tps:.1f} tokens/s")
+            sys.stdout.flush()
+
+    # Use provided callback or our CLI one
+    effective_callback = stats_callback or cli_stats_callback
+
     with open(input_path, 'r', encoding='utf-8') as f:
         content = f.read()
 
-    # Group content into SRT blocks by double newlines
-    blocks = [b.strip() for b in content.split('\n\n') if b.strip()]
-    total_blocks = len(blocks)
+    parsed_blocks = parse_srt(content)
+    total_blocks = len(parsed_blocks)
+    if total_blocks == 0:
+        return
 
     # Split blocks into 4 chunks
     num_chunks = 4
     chunk_size = (total_blocks + num_chunks - 1) // num_chunks
-    chunks = []
-    chunk_block_counts = []
+    chunks_data = []
     for i in range(0, total_blocks, chunk_size):
-        chunk_blocks = blocks[i:i + chunk_size]
-        chunks.append("\n\n".join(chunk_blocks))
-        chunk_block_counts.append(len(chunk_blocks))
+        chunks_data.append(parsed_blocks[i:i + chunk_size])
 
     client = OpenAI(base_url=LLM_API_URL, api_key="EMPTY")
     converter = opencc.OpenCC('s2t')
 
     # Wrapper for stats_callback to include total_blocks
     def wrapped_callback(chunk_id, tokens, duration, chunk_content):
-        if stats_callback:
-            # Count how many blocks are in the current translated content
-            # This is a rough estimate of progress within the chunk
-            translated_blocks = len(
-                [b for b in chunk_content.split('\n\n') if b.strip()])
-            stats_callback(chunk_id, tokens, duration,
-                           translated_blocks, total_blocks, chunk_block_counts[chunk_id])
+        # Count how many lines are in the current translated content
+        translated_lines = len(
+            [l for l in chunk_content.split('\n') if l.strip()])
+        effective_callback(chunk_id, tokens, duration,
+                           translated_lines, total_blocks, len(chunks_data[chunk_id]))
 
     with ThreadPoolExecutor(max_workers=4) as executor:
-        # Use enumerate to provide a unique chunk_id for each thread
-        futures = [executor.submit(translate_chunk, client, chunk, converter, context, wrapped_callback, i)
-                   for i, chunk in enumerate(chunks)]
-        translated_chunks = [f.result() for f in futures]
+        futures = []
+        for i, chunk_blocks in enumerate(chunks_data):
+            texts = [b['text'] for b in chunk_blocks]
+            futures.append(executor.submit(translate_chunk, client,
+                           texts, converter, context, wrapped_callback, i))
 
+        translated_results = [f.result() for f in futures]
+
+    if not stats_callback:
+        print()  # New line after progress bar
+
+    # Reconstruct SRT
     with open(output_path, 'w', encoding='utf-8') as f:
-        # Join chunks with double newlines and ensure trailing newline
-        f.write("\n\n".join(translated_chunks) + "\n\n")
+        global_idx = 1
+        for chunk_idx, result_text in enumerate(translated_results):
+            original_chunk_blocks = chunks_data[chunk_idx]
+            translated_lines = [l.strip()
+                                for l in result_text.split('\n') if l.strip()]
+
+            # If LLM returned wrong number of lines, we might need to handle it,
+            # but for now we'll try to match them.
+            for i, block in enumerate(original_chunk_blocks):
+                f.write(f"{global_idx}\n")
+                f.write(f"{block['timestamp']}\n")
+                # Use translated line if available, else original
+                text = translated_lines[i] if i < len(
+                    translated_lines) else block['text']
+                # Remove any leading "1. " etc if LLM ignored instructions
+                import re
+                text = re.sub(r'^\d+\.\s*', '', text)
+                f.write(f"{text}\n\n")
+                global_idx += 1
 
 
 def main():
-    if len(sys.argv) < 2:
-        print("Usage: python srt.py <video_file> [context]")
-        return
+    # Update global variables
+    global ASR_API_URL, ASR_MODEL, LLM_API_URL, LLM_MODEL, ASR_BACKEND, SOURCE_LANG, DEST_LANG
+    global MERGE_DURATION, MERGE_DURATION_FORCE, HF_TOKEN, USE_DIARIZATION, MIN_SPEAKERS
+    global UNLOAD_MODELS_AFTER_USE, SAVE_DEBUG_SRT, SAVE_ORIGIN_SRT
 
-    video_file = sys.argv[1]
-    context = sys.argv[2] if len(sys.argv) > 2 else ""
+    parser = argparse.ArgumentParser(
+        description="WTAKO SRT Generator & Translator CLI")
+    parser.add_argument("video_files", nargs="+",
+                        help="Video files to process")
+    parser.add_argument("--context", type=str, default="",
+                        help="Translation context")
+    parser.add_argument("--asr-url", type=str,
+                        default=ASR_API_URL, help="ASR API URL")
+    parser.add_argument("--asr-model", type=str,
+                        default=ASR_MODEL, help="ASR Model name")
+    parser.add_argument("--asr-backend", type=str, choices=[
+                        "openai", "sensevoice", "qwen_asr"], default=ASR_BACKEND, help="ASR Backend")
+    parser.add_argument("--source-lang", type=str, default=SOURCE_LANG,
+                        help="Source language code (e.g., ja, zh, en)")
+    parser.add_argument("--dest-lang", type=str, default=DEST_LANG,
+                        help="Destination language description")
+    parser.add_argument("--llm-url", type=str,
+                        default=LLM_API_URL, help="LLM API URL")
+    parser.add_argument("--llm-model", type=str,
+                        default=LLM_MODEL, help="LLM Model name")
+    parser.add_argument("--merge-duration", type=float,
+                        default=MERGE_DURATION, help="Merge duration (s)")
+    parser.add_argument("--merge-duration-force", type=float,
+                        default=MERGE_DURATION_FORCE, help="Force merge duration (s)")
+    parser.add_argument("--min-speakers", type=int,
+                        default=MIN_SPEAKERS, help="Minimum speakers for diarization")
+    parser.add_argument("--hf-token", type=str, default=HF_TOKEN,
+                        help="Hugging Face Token for diarization")
+    parser.add_argument("--no-diarization", action="store_false",
+                        dest="use_diarization", help="Disable speaker diarization")
+    parser.set_defaults(use_diarization=USE_DIARIZATION)
+    parser.add_argument("--unload-models", action="store_true",
+                        dest="unload_models", help="Unload models after use to save VRAM")
+    parser.set_defaults(unload_models=UNLOAD_MODELS_AFTER_USE)
+    parser.add_argument("--save-debug-srt", action="store_true",
+                        dest="save_debug_srt", help="Save debug diarization SRT")
+    parser.set_defaults(save_debug_srt=SAVE_DEBUG_SRT)
+    parser.add_argument("--no-origin-srt", action="store_false",
+                        dest="save_origin_srt", help="Do not save original language SRT")
+    parser.set_defaults(save_origin_srt=SAVE_ORIGIN_SRT)
 
-    # Setup output directory
-    video_name = os.path.basename(video_file)
-    output_dir = os.path.join("output", video_name)
-    os.makedirs(output_dir, exist_ok=True)
-    print(f"Working directory: {output_dir}")
+    args = parser.parse_args()
 
-    audio_bytes = extract_audio(video_file)
+    ASR_API_URL = args.asr_url
+    ASR_MODEL = args.asr_model
+    LLM_API_URL = args.llm_url
+    LLM_MODEL = args.llm_model
+    ASR_BACKEND = args.asr_backend
+    SOURCE_LANG = args.source_lang
+    DEST_LANG = args.dest_lang
+    MERGE_DURATION = args.merge_duration
+    MERGE_DURATION_FORCE = args.merge_duration_force
+    HF_TOKEN = args.hf_token
+    USE_DIARIZATION = args.use_diarization
+    MIN_SPEAKERS = args.min_speakers
+    UNLOAD_MODELS_AFTER_USE = args.unload_models
+    SAVE_DEBUG_SRT = args.save_debug_srt
+    SAVE_ORIGIN_SRT = args.save_origin_srt
+    context = args.context
 
-    # Try community diarization first (no VAD)
-    diarization_result = run_diarization_community(audio_bytes)
+    if HF_TOKEN:
+        os.environ["HF_TOKEN"] = HF_TOKEN
 
-    if diarization_result is not None:
-        timestamps, raw_timestamps = diarization_result
+    for video_file in args.video_files:
+        print(f"\nProcessing: {video_file}")
+        base_path = os.path.splitext(video_file)[0]
 
-        # Save raw debug diarization SRT before merging
-        diarization_srt = os.path.join(output_dir, "debug.diarization.srt")
-        with open(diarization_srt, 'w', encoding='utf-8') as f:
-            for i, seg in enumerate(raw_timestamps):
-                f.write(f"{i+1}\n")
-                f.write(
-                    f"{format_timestamp(seg['start'] / 16000)} --> {format_timestamp(seg['end'] / 16000)}\n")
-                speaker = seg.get('speaker', 'UNKNOWN')
-                f.write(
-                    f"{speaker} (start: {seg['start']}, end: {seg['end']})\n\n")
-        print(f"Saved raw debug diarization to {diarization_srt}")
-    else:
+        audio_bytes = extract_audio(video_file)
+
+        # 2. Diarization / VAD
         timestamps = None
+        if USE_DIARIZATION:
+            if not HF_TOKEN:
+                print("Warning: HF_TOKEN not set. Skipping diarization.")
+            else:
+                diarization_result = run_diarization_community(
+                    audio_bytes,
+                    min_speakers=MIN_SPEAKERS
+                )
+                if diarization_result:
+                    timestamps, raw_timestamps = diarization_result
+                    if SAVE_DEBUG_SRT:
+                        diarization_srt = f"{base_path}.debug.diarization.srt"
+                        with open(diarization_srt, 'w', encoding='utf-8') as f:
+                            for idx, seg in enumerate(raw_timestamps):
+                                f.write(f"{idx+1}\n")
+                                f.write(
+                                    f"{format_timestamp(seg['start'] / 16000)} --> {format_timestamp(seg['end'] / 16000)}\n")
+                                speaker = seg.get('speaker', 'UNKNOWN')
+                                f.write(
+                                    f"{speaker} (start: {seg['start']}, end: {seg['end']})\n\n")
+                        print(f"Saved debug diarization to {diarization_srt}")
 
-    # Fallback to VAD if community fails
-    if timestamps is None:
-        timestamps, wav_tensor = get_vad_timestamps(audio_bytes)
-    else:
-        # Need wav_tensor for transcription
-        # Convert bytes to tensor without loading Silero VAD
-        audio_stream = io.BytesIO(audio_bytes)
-        with wave.open(audio_stream, 'rb') as wav_file:
-            params = wav_file.getparams()
-            frames = wav_file.readframes(params.nframes)
-            audio_np = np.frombuffer(
-                frames, dtype=np.int16).astype(np.float32) / 32768.0
-            wav_tensor = torch.from_numpy(audio_np)
+        if timestamps is None:
+            print("Running VAD...")
+            timestamps, wav_tensor = get_vad_timestamps(audio_bytes)
+        else:
+            # Convert bytes to tensor
+            audio_stream = io.BytesIO(audio_bytes)
+            with wave.open(audio_stream, 'rb') as wav_file:
+                params = wav_file.getparams()
+                frames = wav_file.readframes(params.nframes)
+                audio_np = np.frombuffer(
+                    frames, dtype=np.int16).astype(np.float32) / 32768.0
+                wav_tensor = torch.from_numpy(audio_np)
 
-    segments = transcribe_fragments(wav_tensor, timestamps)
+        if UNLOAD_MODELS_AFTER_USE:
+            unload_models()
 
-    source_srt = os.path.join(output_dir, f"{SOURCE_LANG}.srt")
-    dest_srt = os.path.join(output_dir, "translated.srt")
+        # 3. Transcribe
+        segments = transcribe_fragments(wav_tensor, timestamps)
 
-    save_srt(segments, source_srt)
-    print(f"Saved {SOURCE_LANG} subtitles to {source_srt}")
+        source_srt = f"{base_path}.{SOURCE_LANG}.srt"
+        dest_srt = f"{base_path}.translated.srt"
 
-    translate_srt(source_srt, dest_srt, context)
-    print(f"Saved {DEST_LANG} subtitles to {dest_srt}")
+        save_srt(segments, source_srt)
+        print(f"Saved {SOURCE_LANG} subtitles to {source_srt}")
+
+        if UNLOAD_MODELS_AFTER_USE:
+            unload_models()
+
+        # 4. Translate
+        translate_srt(source_srt, dest_srt, context)
+        print(f"Saved {DEST_LANG} subtitles to {dest_srt}")
+
+        if not SAVE_ORIGIN_SRT:
+            try:
+                if os.path.exists(source_srt):
+                    os.remove(source_srt)
+            except Exception as e:
+                print(f"Failed to remove original SRT: {e}")
+
+    unload_models()
 
 
 if __name__ == "__main__":
