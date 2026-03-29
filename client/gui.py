@@ -319,7 +319,9 @@ class ASRGui(ctk.CTk):
         self.qwen_frame.grid(row=5, column=0, columnspan=2, sticky="ew")
         self.qwen_frame.grid_columnconfigure(1, weight=1)
 
-        ctk.CTkLabel(self.qwen_frame, text=self.i18n.get("qwen_device", "Device:")).grid(
+        self.qwen_device_label = ctk.CTkLabel(
+            self.qwen_frame, text=self.i18n.get("qwen_device", "Device:"))
+        self.qwen_device_label.grid(
             row=0, column=0, padx=10, pady=5, sticky="w")
         self.qwen_device_option = ctk.CTkOptionMenu(
             self.qwen_frame, values=["cuda", "cpu"])
@@ -327,6 +329,12 @@ class ASRGui(ctk.CTk):
             row=0, column=1, padx=10, pady=5, sticky="ew")
         self.qwen_device_option.set(self.config.get(
             "qwen_asr", {}).get("device", "cuda"))
+
+        self.qwen_vllm_url_label = ctk.CTkLabel(
+            self.qwen_frame, text=self.i18n.get("qwen_vllm_url", "vLLM URL:"))
+        self.qwen_vllm_url_entry = ctk.CTkEntry(self.qwen_frame)
+        self.qwen_vllm_url_entry.insert(0, self.config.get(
+            "qwen_asr", {}).get("base_url", "http://localhost:8003/v1"))
 
         ctk.CTkLabel(self.qwen_frame, text=self.i18n.get("qwen_language", "Language:")).grid(
             row=1, column=0, padx=10, pady=5, sticky="w")
@@ -348,46 +356,62 @@ class ASRGui(ctk.CTk):
         self.qwen_model_option.set(self.config.get(
             "qwen_asr", {}).get("model_id", "Qwen/Qwen3-ASR-1.7B"))
 
-        # Qwen vLLM specific settings
+        # Qwen vLLM specific settings (Separate Frame)
         self.qwen_vllm_frame = ctk.CTkFrame(
             self.settings_frame, fg_color="transparent")
         self.qwen_vllm_frame.grid(row=5, column=0, columnspan=2, sticky="ew")
         self.qwen_vllm_frame.grid_columnconfigure(1, weight=1)
 
         ctk.CTkLabel(self.qwen_vllm_frame, text=self.i18n.get("qwen_vllm_url", "vLLM URL:")).grid(
-            row=3, column=0, padx=10, pady=5, sticky="w")
-        self.qwen_vllm_url_entry = ctk.CTkEntry(self.qwen_vllm_frame)
-        self.qwen_vllm_url_entry.grid(
-            row=3, column=1, padx=10, pady=5, sticky="ew")
-        self.qwen_vllm_url_entry.insert(0, self.config.get(
+            row=0, column=0, padx=10, pady=5, sticky="w")
+        self.qwen_vllm_url_entry_sep = ctk.CTkEntry(self.qwen_vllm_frame)
+        self.qwen_vllm_url_entry_sep.grid(
+            row=0, column=1, padx=10, pady=5, sticky="ew")
+        self.qwen_vllm_url_entry_sep.insert(0, self.config.get(
             "qwen_asr", {}).get("base_url", "http://localhost:8003/v1"))
+
+        ctk.CTkLabel(self.qwen_vllm_frame, text=self.i18n.get("qwen_language", "Language:")).grid(
+            row=1, column=0, padx=10, pady=5, sticky="w")
+        self.qwen_vllm_lang_option = ctk.CTkOptionMenu(
+            self.qwen_vllm_frame, values=qwen_supported_langs)
+        self.qwen_vllm_lang_option.grid(
+            row=1, column=1, padx=10, pady=5, sticky="ew")
+        self.qwen_vllm_lang_option.set(self.config.get(
+            "qwen_asr", {}).get("language", "auto"))
 
         if self.backend_option.get() == "glm":
             self.sensevoice_frame.grid_remove()
             self.whisper_frame.grid_remove()
             self.qwen_frame.grid_remove()
+            self.qwen_vllm_frame.grid_remove()
         elif self.backend_option.get() == "whisper":
             self.system_prompt_label.grid_remove()
             self.system_prompt_entry.grid_remove()
             self.sensevoice_frame.grid_remove()
             self.whisper_frame.grid()
             self.qwen_frame.grid_remove()
-        elif self.backend_option.get() in ["qwen", "qwen_vllm"]:
+            self.qwen_vllm_frame.grid_remove()
+        elif self.backend_option.get() == "qwen":
             self.system_prompt_label.grid_remove()
             self.system_prompt_entry.grid_remove()
             self.sensevoice_frame.grid_remove()
             self.whisper_frame.grid_remove()
             self.qwen_frame.grid()
-            if self.backend_option.get() == "qwen_vllm":
-                self.qwen_vllm_frame.grid()
-            else:
-                self.qwen_vllm_frame.grid_remove()
+            self.qwen_vllm_frame.grid_remove()
+        elif self.backend_option.get() == "qwen_vllm":
+            self.system_prompt_label.grid_remove()
+            self.system_prompt_entry.grid_remove()
+            self.sensevoice_frame.grid_remove()
+            self.whisper_frame.grid_remove()
+            self.qwen_frame.grid_remove()
+            self.qwen_vllm_frame.grid()
         else:
             self.system_prompt_label.grid_remove()
             self.system_prompt_entry.grid_remove()
             self.sensevoice_frame.grid()
             self.whisper_frame.grid_remove()
             self.qwen_frame.grid_remove()
+            self.qwen_vllm_frame.grid_remove()
 
         self.disable_log_var = ctk.BooleanVar(
             value=self.config.get("disable_log", False))
@@ -444,6 +468,7 @@ class ASRGui(ctk.CTk):
             self.sensevoice_frame.grid_remove()
             self.whisper_frame.grid_remove()
             self.qwen_frame.grid_remove()
+            self.qwen_vllm_frame.grid_remove()
             return
 
         if backend == "glm":
@@ -452,28 +477,35 @@ class ASRGui(ctk.CTk):
             self.sensevoice_frame.grid_remove()
             self.whisper_frame.grid_remove()
             self.qwen_frame.grid_remove()
+            self.qwen_vllm_frame.grid_remove()
         elif backend == "whisper":
             self.system_prompt_label.grid_remove()
             self.system_prompt_entry.grid_remove()
             self.sensevoice_frame.grid_remove()
             self.whisper_frame.grid()
             self.qwen_frame.grid_remove()
-        elif backend in ["qwen", "qwen_vllm"]:
+            self.qwen_vllm_frame.grid_remove()
+        elif backend == "qwen":
             self.system_prompt_label.grid_remove()
             self.system_prompt_entry.grid_remove()
             self.sensevoice_frame.grid_remove()
             self.whisper_frame.grid_remove()
             self.qwen_frame.grid()
-            if backend == "qwen_vllm":
-                self.qwen_vllm_frame.grid()
-            else:
-                self.qwen_vllm_frame.grid_remove()
+            self.qwen_vllm_frame.grid_remove()
+        elif backend == "qwen_vllm":
+            self.system_prompt_label.grid_remove()
+            self.system_prompt_entry.grid_remove()
+            self.sensevoice_frame.grid_remove()
+            self.whisper_frame.grid_remove()
+            self.qwen_frame.grid_remove()
+            self.qwen_vllm_frame.grid()
         else:
             self.system_prompt_label.grid_remove()
             self.system_prompt_entry.grid_remove()
             self.sensevoice_frame.grid()
             self.whisper_frame.grid_remove()
             self.qwen_frame.grid_remove()
+            self.qwen_vllm_frame.grid_remove()
 
     def transition_to(self, new_state, error_msg=None):
         self.app_state = new_state
@@ -512,6 +544,8 @@ class ASRGui(ctk.CTk):
             self.qwen_device_option.configure(state=state)
             self.qwen_lang_option.configure(state=state)
             self.qwen_model_option.configure(state=state)
+            self.qwen_vllm_url_entry_sep.configure(state=state)
+            self.qwen_vllm_lang_option.configure(state=state)
             self.opencc_option.configure(state=state)
             self.disable_log_checkbox.configure(state=state)
             self.save_button.configure(state=state)
@@ -832,14 +866,17 @@ class ASRGui(ctk.CTk):
                 "language": self.whisper_lang_option.get(),
                 "task": self.whisper_task_option.get()
             }
-        elif backend in ["qwen", "qwen_vllm"]:
+        elif backend == "qwen":
             settings["qwen_asr"] = {
                 "device": self.qwen_device_option.get(),
                 "language": self.qwen_lang_option.get(),
                 "model_id": self.qwen_model_option.get()
             }
-            if backend == "qwen_vllm":
-                settings["qwen_asr"]["base_url"] = self.qwen_vllm_url_entry.get()
+        elif backend == "qwen_vllm":
+            settings["qwen_asr"] = {
+                "base_url": self.qwen_vllm_url_entry_sep.get(),
+                "language": self.qwen_vllm_lang_option.get()
+            }
         else:  # sensevoice
             try:
                 threads = int(self.threads_entry.get())

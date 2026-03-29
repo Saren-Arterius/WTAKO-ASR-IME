@@ -71,7 +71,8 @@ dependencies = [
     "typing-extensions==4.15.0",
     "urllib3==2.6.2",
     "pytorch-triton-rocm==3.5.1; sys_platform == 'linux'",
-    "qwen-asr"
+    "qwen-asr",
+    "openai"
 ]
 
 [project.optional-dependencies]
