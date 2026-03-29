@@ -149,8 +149,13 @@ class QwenASRBackendVLLM(ASRBackend):
         print(
             f"[ASR Timing] LLM response received in {time.time() - response_start:.3f}s")
 
-        text = response.choices[0].message.content.strip()
-        print(f"[ASR Result] Transcription: {text}")
+        info = response.choices[0].message.content.split('<asr_text>')
+        if len(info) == 1:
+            text = info[0].strip()
+            print(f"[ASR Result] Transcription: {text}")
+        else:
+            text = info[1].strip()
+            print(f"[ASR Result] {info[0]}; Transcription: {text}")
 
         print(
             f"[ASR Summary] Total time: {time.time() - start_time:.3f}s, lang={language}")

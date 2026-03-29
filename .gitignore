@@ -16,3 +16,5 @@ uv.*.lock
 
 # Models
 sherpa-onnx-sense-voice*/
+
+output
