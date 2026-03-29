@@ -230,14 +230,14 @@ class ASRGui(ctk.CTk):
         ctk.CTkLabel(self.settings_frame, text=self.i18n.get(
             "asr_backend", "ASR Backend:")).grid(row=4, column=0, padx=10, pady=5, sticky="w")
         self.backend_option = ctk.CTkOptionMenu(self.settings_frame, values=[
-                                                "glm", "sherpa-onnx/sense-voice", "whisper", "qwen_asr_tf", "qwen_vllm"], command=self.on_backend_change)
+                                                "glm", "sherpa-onnx/sense-voice", "whisper", "qwen", "qwen_vllm"], command=self.on_backend_change)
         self.backend_option.grid(row=4, column=1, padx=10, pady=5, sticky="ew")
 
         current_backend = self.config.get("asr_backend", "glm")
         if current_backend == "sensevoice":
             current_backend = "sherpa-onnx/sense-voice"
         elif current_backend == "qwen":
-            current_backend = "qwen_asr_tf"
+            current_backend = "qwen"
         self.backend_option.set(current_backend)
 
         self.system_prompt_label = ctk.CTkLabel(
@@ -372,7 +372,7 @@ class ASRGui(ctk.CTk):
             self.sensevoice_frame.grid_remove()
             self.whisper_frame.grid()
             self.qwen_frame.grid_remove()
-        elif self.backend_option.get() in ["qwen_asr_tf", "qwen_vllm"]:
+        elif self.backend_option.get() in ["qwen", "qwen_vllm"]:
             self.system_prompt_label.grid_remove()
             self.system_prompt_entry.grid_remove()
             self.sensevoice_frame.grid_remove()
@@ -458,7 +458,7 @@ class ASRGui(ctk.CTk):
             self.sensevoice_frame.grid_remove()
             self.whisper_frame.grid()
             self.qwen_frame.grid_remove()
-        elif backend in ["qwen_asr_tf", "qwen_vllm"]:
+        elif backend in ["qwen", "qwen_vllm"]:
             self.system_prompt_label.grid_remove()
             self.system_prompt_entry.grid_remove()
             self.sensevoice_frame.grid_remove()
@@ -832,7 +832,7 @@ class ASRGui(ctk.CTk):
                 "language": self.whisper_lang_option.get(),
                 "task": self.whisper_task_option.get()
             }
-        elif backend in ["qwen_asr_tf", "qwen_vllm"]:
+        elif backend in ["qwen", "qwen_vllm"]:
             settings["qwen_asr"] = {
                 "device": self.qwen_device_option.get(),
                 "language": self.qwen_lang_option.get(),

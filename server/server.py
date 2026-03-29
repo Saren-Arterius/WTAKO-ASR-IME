@@ -29,7 +29,7 @@ class ASRServer:
             self.backend = SenseVoiceBackend(config=self.config)
         elif backend_type == "whisper":
             self.backend = WhisperBackend(config=self.config)
-        elif backend_type == "qwen" or backend_type == "qwen_asr_tf":
+        elif backend_type == "qwen" or backend_type == "qwen":
             self.backend = QwenASRBackend(config=self.config)
         elif backend_type == "qwen_vllm":
             self.backend = QwenASRBackendVLLM(config=self.config)

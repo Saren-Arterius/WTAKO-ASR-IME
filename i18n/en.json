@@ -43,6 +43,6 @@
     "qwen_language": "Qwen Language:",
     "qwen_model": "Qwen Model:",
     "qwen_vllm_url": "vLLM URL:",
-    "qwen_asr_tf": "Qwen ASR (Transformers)",
+    "qwen": "Qwen ASR (Transformers)",
     "qwen_vllm": "Qwen ASR (vLLM)"
 }
