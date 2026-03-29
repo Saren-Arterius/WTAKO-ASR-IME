@@ -55,7 +55,9 @@
         "device": "cuda",
         "language": "Cantonese",
         "max_inference_batch_size": 32,
-        "max_new_tokens": 256
+        "max_new_tokens": 256,
+        "base_url": "http://localhost:8003/v1",
+        "api_key": "EMPTY"
     },
     "use_local_server": true,
     "hotkey": "f9",
