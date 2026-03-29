@@ -20,6 +20,10 @@ A real-time Speech-to-Text (STT) system specifically optimized for **Cantonese**
 │   └── server.py            # ASR HTTP server (GLM-ASR model)
 ├── i18n/                    # Internationalization files (en, zh_TW)
 ├── assets/                  # Notification sounds
+├── srt-generate-translate/  # SRT generation and translation tool
+│   ├── gui.py               # GUI for SRT tool
+│   ├── srt.py               # Core logic for SRT generation/translation
+│   └── srt_config.json      # Configuration for SRT tool
 ├── requirements.txt         # Python dependencies
 └── README.md
 ```
@@ -38,6 +42,7 @@ A real-time Speech-to-Text (STT) system specifically optimized for **Cantonese**
 - **Traditional Chinese Support**: Built-in Simplified to Traditional Chinese conversion (OpenCC).
 - **Multi-language UI**: Supports English and Traditional Chinese (auto-detected or configurable).
 - **Distributed Architecture**: Run the ASR model on a separate machine to save resources on your main workstation.
+- **SRT Generation & Translation**: A dedicated tool to automatically generate subtitles from video files and translate them using LLM backends, with support for batch processing and context-aware translation.
 
 ## Installation
 
@@ -140,6 +145,24 @@ uv run server/server.py --port 8000
 # SenseVoice
 uv run server/server.py --port 8000 --backend sensevoice
 ```
+
+### 4. SRT Generation & Translation Tool
+
+To use the subtitle generation and translation tool:
+
+```bash
+uv run srt-generate-translate/gui.py
+```
+
+> [!TIP]
+> **Font Issues with `uv`**: If you find that the GUI only displays a "fixed" font and cannot show CJK characters correctly, it's likely because `uv`'s portable Python binaries are not integrated with your system's font configuration. 
+> 
+> To fix this, recreate your virtual environment using the system's Python:
+> ```bash
+> rm -rf .venv
+> uv venv --python $(which python3)
+> uv pip install -r requirements.txt
+> ```
 
 ## Configuration
 

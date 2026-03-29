@@ -1,0 +1,20 @@
+{
+    "ASR_API_URL": "http://100.64.0.8:8003/v1",
+    "ASR_MODEL": "Qwen/Qwen3-ASR-1.7B",
+    "ASR_BACKEND": "openai",
+    "SOURCE_LANG": "ja",
+    "DEST_LANG": "Traditional Chinese (Taiwan style)",
+    "LLM_API_URL": "http://100.64.0.8:8000",
+    "LLM_MODEL": "Intel/Qwen3-Coder-Next-int4-AutoRound",
+    "merge_duration": 0.5,
+    "merge_duration_force": 0.2,
+    "min_speakers": 5,
+    "HF_TOKEN": "HF_TOKEN",
+    "use_diarization": true,
+    "appearance_mode": "Dark",
+    "video_files": [
+        "/mnt/extras@WTAKO/unext-dl/output/\u7b2c172\u8a71_\u9ed2\u9f8d\u738b\u30fb\u30d6\u30e9\u30c3\u30af\u30c8\u30e9\u30b4\u30f3/\u7b2c172\u8a71 \u9ed2\u9f8d\u738b\u30fb\u30d6\u30e9\u30c3\u30af\u30c8\u30e9\u30b4\u30f3.mp4"
+    ],
+    "context": "\u30d1\u30ba\u30c9\u30e9=\u9f8d\u62fc \u30d6\u30e9\u30c3\u30af\u30c8\u30e9\u30c3\u30d7=\u9ed1\u9f8d\u738b \u5fd7\u58eb\u3060\u3053/\u30b7\u30b7\u30c0\u30b3=\u7345\u5b50\u7ae0\u9b5a \u30de\u30b9\u30b3\u30c3\u30c8=\u5409\u7965\u7269",
+    "unload_models_after_use": false
+}

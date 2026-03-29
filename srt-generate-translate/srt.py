@@ -1,3 +1,4 @@
+import time
 import os
 import sys
 import torch
@@ -18,6 +19,73 @@ ASR_API_URL = "http://100.64.0.8:8003/v1"
 ASR_MODEL = "Qwen/Qwen3-ASR-1.7B"
 LLM_API_URL = "http://100.64.0.8:8000/v1"
 LLM_MODEL = "Intel/Qwen3-Coder-Next-int4-AutoRound"
+ASR_BACKEND = "openai"  # "openai", "sensevoice", or "qwen_asr"
+SOURCE_LANG = "ja"
+DEST_LANG = "Traditional Chinese (Taiwan/Hong Kong style)"
+MERGE_DURATION_FORCE = 0.2
+
+_sensevoice_recognizer = None
+_qwen_asr_model = None
+_diarization_pipeline = None
+
+
+def unload_models():
+    global _sensevoice_recognizer, _qwen_asr_model, _diarization_pipeline
+    if _qwen_asr_model is not None:
+        print("Unloading Qwen-ASR model...")
+        del _qwen_asr_model
+        _qwen_asr_model = None
+
+    if _sensevoice_recognizer is not None:
+        print("Unloading SenseVoice recognizer...")
+        del _sensevoice_recognizer
+        _sensevoice_recognizer = None
+
+    if _diarization_pipeline is not None:
+        print("Unloading Diarization pipeline...")
+        del _diarization_pipeline
+        _diarization_pipeline = None
+
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    import gc
+    gc.collect()
+
+
+def get_qwen_asr_model():
+    global _qwen_asr_model
+    if _qwen_asr_model is None:
+        import torch
+        from qwen_asr import Qwen3ASRModel
+        model_id = globals().get('ASR_MODEL', "Qwen/Qwen3-ASR-1.7B")
+        device = "cuda:0" if torch.cuda.is_available() else "cpu"
+        dtype = torch.bfloat16 if "cuda" in device else torch.float32
+        print(f"Loading {model_id} model on {device}...")
+        _qwen_asr_model = Qwen3ASRModel.from_pretrained(
+            model_id,
+            dtype=dtype,
+            device_map=device,
+            max_inference_batch_size=32,
+            max_new_tokens=256,
+        )
+    return _qwen_asr_model
+
+
+def get_sensevoice_recognizer():
+    global _sensevoice_recognizer
+    if _sensevoice_recognizer is None:
+        import sherpa_onnx
+        model_dir = "sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17"
+        model_path = os.path.join(model_dir, "model.int8.onnx")
+        tokens_path = os.path.join(model_dir, "tokens.txt")
+        _sensevoice_recognizer = sherpa_onnx.OfflineRecognizer.from_sense_voice(
+            model=model_path,
+            tokens=tokens_path,
+            num_threads=4,
+            use_itn=True,
+            provider="cpu",
+        )
+    return _sensevoice_recognizer
 
 
 def extract_audio(video_path):
@@ -48,62 +116,14 @@ def get_vad_timestamps(audio_bytes):
     return speech_timestamps, wav
 
 
-def run_diarization_on_fragments(wav_tensor, speech_timestamps):
-    print("Running Speaker Diarization (pyannote) on VAD fragments...")
-    try:
-        pipeline = Pipeline.from_pretrained(
-            "pyannote/speaker-diarization-3.1",
-            token=os.environ.get("HF_TOKEN", True)
-        )
-        if torch.cuda.is_available():
-            pipeline.to(torch.device("cuda"))
-    except Exception as e:
-        print(f"Warning: Could not load pyannote pipeline: {e}")
-        return speech_timestamps
+def merge_short_segments(segments, min_duration=None, force_duration=None):
+    print(segments)
+    if min_duration is None:
+        # Try to get from config or default
+        min_duration = globals().get('MERGE_DURATION', 0.5)
+    if force_duration is None:
+        force_duration = globals().get('MERGE_DURATION_FORCE', 0.2)
 
-    new_segments = []
-    for i, ts in enumerate(speech_timestamps):
-        start_sample = ts['start']
-        end_sample = ts['end']
-        fragment = wav_tensor[start_sample:end_sample].numpy()
-
-        # Save fragment to temporary WAV
-        temp_fragment_wav = f"temp_fragment_{i}.wav"
-        with wave.open(temp_fragment_wav, 'wb') as wav_file:
-            wav_file.setnchannels(1)
-            wav_file.setsampwidth(2)
-            wav_file.setframerate(16000)
-            wav_file.writeframes((fragment * 32767).astype(np.int16).tobytes())
-
-        # Run diarization on the fragment
-        diarization = pipeline(temp_fragment_wav)
-        os.remove(temp_fragment_wav)
-
-        # pyannote 3.1 returns an Annotation object which has itertracks
-        # If it returns a dict-like object (DiarizeOutput), we access the annotation
-        annotation = diarization
-        if hasattr(diarization, "annotation"):
-            annotation = diarization.annotation
-
-        turns = list(annotation.itertracks(yield_label=True))
-
-        if not turns:
-            new_segments.append(ts)
-            continue
-
-        # If multiple speakers found in this fragment, split it
-        for turn, _, speaker in turns:
-            # turn.start/end are relative to the fragment start
-            new_segments.append({
-                'start': start_sample + int(turn.start * 16000),
-                'end': start_sample + int(turn.end * 16000),
-                'speaker': speaker
-            })
-
-    return merge_short_segments(new_segments)
-
-
-def merge_short_segments(segments, min_duration=0.3):
     if not segments:
         return []
 
@@ -112,10 +132,20 @@ def merge_short_segments(segments, min_duration=0.3):
 
     for next_seg in segments[1:]:
         duration = (current['end'] - current['start']) / 16000
-        # If current segment is too short, merge it with the next one
-        if duration < min_duration:
+
+        # Check for force merge (regardless of speaker)
+        should_force_merge = duration < force_duration
+
+        # Check for normal merge (same speaker)
+        should_normal_merge = (duration < min_duration and
+                               current.get('speaker') == next_seg.get('speaker'))
+
+        # BUT ignore if either has do_not_merge flag
+        can_merge = not current.get(
+            'do_not_merge') and not next_seg.get('do_not_merge')
+
+        if can_merge and (should_force_merge or should_normal_merge):
             current['end'] = next_seg['end']
-            # Optionally update speaker if needed, here we keep the first
         else:
             merged.append(current)
             current = next_seg
@@ -123,22 +153,31 @@ def merge_short_segments(segments, min_duration=0.3):
     merged.append(current)
 
     # Final pass to handle if the last segment is still too short
-    if len(merged) > 1 and (merged[-1]['end'] - merged[-1]['start']) / 16000 < min_duration:
-        last = merged.pop()
-        merged[-1]['end'] = last['end']
+    if len(merged) > 1:
+        last_duration = (merged[-1]['end'] - merged[-1]['start']) / 16000
+        should_force_merge = last_duration < force_duration
+        should_normal_merge = (last_duration < min_duration and
+                               merged[-1].get('speaker') == merged[-2].get('speaker'))
+
+        if (should_force_merge or should_normal_merge):
+            last = merged.pop()
+            merged[-1]['end'] = last['end']
 
     return merged
 
 
-def run_diarization_community(audio_bytes):
+def run_diarization_community(audio_bytes, min_speakers=None, stats_callback=None):
+    global _diarization_pipeline
     print("Running Speaker Diarization (pyannote-community-1)...")
     try:
-        pipeline = Pipeline.from_pretrained(
-            "pyannote/speaker-diarization-community-1",
-            token=os.environ.get("HF_TOKEN", True)
-        )
-        if torch.cuda.is_available():
-            pipeline.to(torch.device("cuda"))
+        if _diarization_pipeline is None:
+            _diarization_pipeline = Pipeline.from_pretrained(
+                "pyannote/speaker-diarization-community-1",
+                token=os.environ.get("HF_TOKEN", True)
+            )
+            if torch.cuda.is_available():
+                _diarization_pipeline.to(torch.device("cuda"))
+        pipeline = _diarization_pipeline
     except Exception as e:
         print(f"Warning: Could not load pyannote community pipeline: {e}")
         return None
@@ -147,19 +186,86 @@ def run_diarization_community(audio_bytes):
     with open(temp_wav, "wb") as f:
         f.write(audio_bytes)
 
-    output = pipeline(temp_wav)
+    from pyannote.audio.pipelines.utils.hook import ProgressHook
+    with ProgressHook() as hook:
+        if stats_callback:
+            # Hook into the progress hook to update our GUI
+            original_call = hook.__call__
+
+            def hooked_call(step_name, completed, total=None, **kwargs):
+                res = original_call(step_name, completed, total, **kwargs)
+                if total:
+                    stats_callback(step_name, completed, total)
+                return res
+            hook.__call__ = hooked_call
+
+        pipeline_kwargs = {}
+        if min_speakers is not None and min_speakers > 0:
+            pipeline_kwargs["min_speakers"] = min_speakers
+
+        output = pipeline(temp_wav, hook=hook, **pipeline_kwargs)
     os.remove(temp_wav)
 
-    new_segments = []
-    # iterate over speech turns without overlapping speech
-    for turn, speaker in output.exclusive_speaker_diarization:
-        new_segments.append({
+    # Handle overlapping diarization results: prefer the result that has a later "start"
+    # pyannote output.itertracks() provides segments which might overlap
+    all_segments = []
+    # For pyannote community pipeline, output might be a DiarizeOutput object
+    # which contains the annotation in .annotation or similar.
+    annotation = output
+    if hasattr(output, 'annotation'):
+        annotation = output.annotation
+    elif hasattr(output, 'exclusive_speaker_diarization'):
+        # If we can't get the raw annotation with overlaps, we might have to use this,
+        # but the goal is to handle overlaps ourselves.
+        # Let's try to find the most raw annotation.
+        annotation = output.exclusive_speaker_diarization
+
+    for turn, _, speaker in annotation.itertracks(yield_label=True):
+        all_segments.append({
             'start': int(turn.start * 16000),
             'end': int(turn.end * 16000),
             'speaker': speaker
         })
 
-    return merge_short_segments(new_segments)
+    # Sort by start time
+    all_segments.sort(key=lambda x: x['start'])
+
+    new_segments = []
+    for seg in all_segments:
+        if not new_segments:
+            new_segments.append(seg)
+            continue
+
+        prev = new_segments[-1]
+        # Check for overlap
+        if seg['start'] < prev['end']:
+            # Overlap detected.
+            if seg['speaker'] == prev['speaker']:
+                # SAME SPEAKER: Merge into the largest possible span
+                # 20-30 and 10-40 => 10-40
+                # 10-40 and 20-40 => 10-40
+                prev['start'] = min(prev['start'], seg['start'])
+                prev['end'] = max(prev['end'], seg['end'])
+                continue
+            else:
+                # DIFFERENT SPEAKERS: Split into non-overlapping parts
+                if seg['start'] > prev['start']:
+                    prev['end'] = seg['start']
+                    prev['do_not_merge'] = True
+                    seg['do_not_merge'] = True
+                    new_segments.append(seg)
+                else:
+                    if seg['end'] <= prev['end']:
+                        continue
+                    else:
+                        new_segments[-1] = seg
+        else:
+            new_segments.append(seg)
+
+    # For overlapping cases, we ignore MERGE_DURATION as requested.
+    # However, merge_short_segments is still useful for general cleanup.
+    # We'll pass a flag or handle it by ensuring the split points are preserved.
+    return merge_short_segments(new_segments), new_segments
 
 
 def format_timestamp(seconds):
@@ -179,6 +285,50 @@ def transcribe_one(client, i, ts, wav_tensor, total):
     end_sample = min(len(wav_tensor), end_sample + 1600)
 
     fragment = wav_tensor[start_sample:end_sample].numpy()
+
+    if ASR_BACKEND == "sensevoice":
+        recognizer = get_sensevoice_recognizer()
+        stream = recognizer.create_stream()
+        stream.accept_waveform(16000, fragment)
+        recognizer.decode_stream(stream)
+        text = stream.result.text
+        # SenseVoice might include language tags like <|zh|>, remove them if present
+        import re
+        text = re.sub(r'<\|.*?\|>', '', text).strip()
+        return {
+            'index': i,
+            'start': ts['start'] / 16000,
+            'end': ts['end'] / 16000,
+            'text': text
+        }
+
+    if ASR_BACKEND == "qwen_asr":
+        model = get_qwen_asr_model()
+        # Qwen3-ASR accepts (np.ndarray, sr) tuple
+        audio_input = (fragment, 16000)
+
+        # Qwen3-ASR expects full language names
+        qwen_lang_map = {
+            "ja": "Japanese",
+            "zh": "Chinese",
+            "en": "English",
+            "ko": "Korean",
+            "yue": "Cantonese",
+        }
+        language = qwen_lang_map.get(
+            SOURCE_LANG, SOURCE_LANG) if SOURCE_LANG != "auto" else None
+
+        results = model.transcribe(
+            audio=audio_input,
+            language=language,
+        )
+        text = results[0].text.strip()
+        return {
+            'index': i,
+            'start': ts['start'] / 16000,
+            'end': ts['end'] / 16000,
+            'text': text
+        }
 
     # Convert to WAV bytes
     output = io.BytesIO()
@@ -200,7 +350,7 @@ def transcribe_one(client, i, ts, wav_tensor, total):
                         "data": audio_b64, "format": "wav"}}
                 ]
             }],
-            extra_body={"chat_template_kwargs": {"language": "ja"}}
+            extra_body={"chat_template_kwargs": {"language": SOURCE_LANG}}
         )
         text = response.choices[0].message.content
         if '<asr_text>' in text:
@@ -216,13 +366,37 @@ def transcribe_one(client, i, ts, wav_tensor, total):
         return None
 
 
-def transcribe_fragments(wav_tensor, timestamps):
-    client = OpenAI(base_url=ASR_API_URL, api_key="EMPTY")
+def transcribe_fragments(wav_tensor, timestamps, stats_callback=None):
     total = len(timestamps)
+    completed = 0
 
+    def update_progress():
+        nonlocal completed
+        completed += 1
+        if stats_callback:
+            stats_callback(completed, total)
+
+    if ASR_BACKEND in ["sensevoice", "qwen_asr"]:
+        # Local inference is usually better sequential
+        results = []
+        for i, ts in enumerate(timestamps):
+            print(
+                f"Transcribing fragment {i+1}/{total} ({ts['start']/16000:.2f}s) with {ASR_BACKEND}...")
+            res = transcribe_one(None, i, ts, wav_tensor, total)
+            if res:
+                results.append(res)
+            update_progress()
+        return results
+
+    client = OpenAI(base_url=ASR_API_URL, api_key="EMPTY")
     with ThreadPoolExecutor(max_workers=8) as executor:
-        futures = [executor.submit(
-            transcribe_one, client, i, ts, wav_tensor, total) for i, ts in enumerate(timestamps)]
+        def wrapped_transcribe(i, ts):
+            res = transcribe_one(client, i, ts, wav_tensor, total)
+            update_progress()
+            return res
+
+        futures = [executor.submit(wrapped_transcribe, i, ts)
+                   for i, ts in enumerate(timestamps)]
         results = [f.result() for f in futures]
 
     # Filter out None and sort by index
@@ -240,54 +414,107 @@ def save_srt(segments, output_path):
             f.write(f"{seg['text']}\n\n")
 
 
-def translate_chunk(client, chunk_content, converter, context=""):
-    prompt = f"""You are an expert translator specializing in Japanese to Traditional Chinese (Taiwan/Hong Kong style) localization for anime.
+def get_translation_prompt(source_lang, dest_lang, chunk_content, context=""):
+    # Map language codes to names for the prompt
+    lang_map = {
+        "ja": "Japanese",
+        "zh": "Chinese",
+        "en": "English",
+        "ko": "Korean",
+        "yue": "Cantonese",
+        "auto": "Source Language"
+    }
+    source_name = lang_map.get(source_lang, source_lang)
+
+    prompt = f"""You are an expert translator specializing in {source_name} to {dest_lang} localization.
 
 CRITICAL INSTRUCTIONS:
-1. TRANSLATE ALL Japanese text into natural, idiomatic Traditional Chinese. 
-2. DO NOT leave any Japanese sentences or phrases untranslated in the output.
+1. TRANSLATE ALL {source_name} text into natural, idiomatic {dest_lang}. 
+2. DO NOT leave any {source_name} sentences or phrases untranslated in the output.
 3. Maintain the SRT format (index, timestamps) exactly.
-4. Use Traditional Chinese characters only.
+4. Use {dest_lang} characters and style.
 {f'5. Additional Context/Instructions: {context}' if context else ''}
 
-Input Japanese SRT:
+Input {source_name} SRT:
 {chunk_content}
 
-Output Traditional Chinese SRT:"""
+Output {dest_lang} SRT:"""
+    return prompt
+
+
+def translate_chunk(client, chunk_content, converter, context="", stats_callback=None, chunk_id=0):
+    prompt = get_translation_prompt(
+        SOURCE_LANG, DEST_LANG, chunk_content, context)
     try:
         response = client.chat.completions.create(
             model=LLM_MODEL,
             messages=[{"role": "user", "content": prompt}],
-            temperature=0.1
+            temperature=0.1,
+            stream=True
         )
-        translated = response.choices[0].message.content.strip()
+
+        full_content = ""
+        start_time = None
+        token_count = 0
+
+        for chunk in response:
+            if chunk.choices[0].delta.content:
+                if start_time is None:
+                    start_time = time.time()
+
+                content = chunk.choices[0].delta.content
+                full_content += content
+                token_count += 1  # Rough estimate per chunk
+                if stats_callback:
+                    # Pass current token count and elapsed time for real-time TPS
+                    stats_callback(chunk_id, token_count,
+                                   time.time() - start_time, full_content)
+
+        translated = full_content.strip()
         return converter.convert(translated)
     except Exception as e:
         print(f"Chunk translation error: {e}")
         return chunk_content.strip()
 
 
-def translate_srt(input_path, output_path, context=""):
+def translate_srt(input_path, output_path, context="", stats_callback=None):
     print(
-        f"Translating to Traditional Chinese (Parallel)... Context: {context if context else 'None'}")
+        f"Translating to {DEST_LANG} (Parallel)... Context: {context if context else 'None'}")
     with open(input_path, 'r', encoding='utf-8') as f:
         content = f.read()
 
     # Group content into SRT blocks by double newlines
     blocks = [b.strip() for b in content.split('\n\n') if b.strip()]
+    total_blocks = len(blocks)
 
     # Split blocks into 4 chunks
     num_chunks = 4
-    chunk_size = (len(blocks) + num_chunks - 1) // num_chunks
-    chunks = ["\n\n".join(blocks[i:i + chunk_size])
-              for i in range(0, len(blocks), chunk_size)]
+    chunk_size = (total_blocks + num_chunks - 1) // num_chunks
+    chunks = []
+    chunk_block_counts = []
+    for i in range(0, total_blocks, chunk_size):
+        chunk_blocks = blocks[i:i + chunk_size]
+        chunks.append("\n\n".join(chunk_blocks))
+        chunk_block_counts.append(len(chunk_blocks))
 
     client = OpenAI(base_url=LLM_API_URL, api_key="EMPTY")
     converter = opencc.OpenCC('s2t')
 
+    # Wrapper for stats_callback to include total_blocks
+    def wrapped_callback(chunk_id, tokens, duration, chunk_content):
+        if stats_callback:
+            # Count how many blocks are in the current translated content
+            # This is a rough estimate of progress within the chunk
+            translated_blocks = len(
+                [b for b in chunk_content.split('\n\n') if b.strip()])
+            stats_callback(chunk_id, tokens, duration,
+                           translated_blocks, total_blocks, chunk_block_counts[chunk_id])
+
     with ThreadPoolExecutor(max_workers=4) as executor:
-        translated_chunks = list(executor.map(
-            lambda c: translate_chunk(client, c, converter, context), chunks))
+        # Use enumerate to provide a unique chunk_id for each thread
+        futures = [executor.submit(translate_chunk, client, chunk, converter, context, wrapped_callback, i)
+                   for i, chunk in enumerate(chunks)]
+        translated_chunks = [f.result() for f in futures]
 
     with open(output_path, 'w', encoding='utf-8') as f:
         # Join chunks with double newlines and ensure trailing newline
@@ -311,31 +538,49 @@ def main():
     audio_bytes = extract_audio(video_file)
 
     # Try community diarization first (no VAD)
-    timestamps = run_diarization_community(audio_bytes)
+    diarization_result = run_diarization_community(audio_bytes)
 
-    # Fallback to VAD + Fragmented Diarization if community fails
+    if diarization_result is not None:
+        timestamps, raw_timestamps = diarization_result
+
+        # Save raw debug diarization SRT before merging
+        diarization_srt = os.path.join(output_dir, "debug.diarization.srt")
+        with open(diarization_srt, 'w', encoding='utf-8') as f:
+            for i, seg in enumerate(raw_timestamps):
+                f.write(f"{i+1}\n")
+                f.write(
+                    f"{format_timestamp(seg['start'] / 16000)} --> {format_timestamp(seg['end'] / 16000)}\n")
+                speaker = seg.get('speaker', 'UNKNOWN')
+                f.write(
+                    f"{speaker} (start: {seg['start']}, end: {seg['end']})\n\n")
+        print(f"Saved raw debug diarization to {diarization_srt}")
+    else:
+        timestamps = None
+
+    # Fallback to VAD if community fails
     if timestamps is None:
-        vad_timestamps, wav_tensor = get_vad_timestamps(audio_bytes)
-        timestamps = run_diarization_on_fragments(wav_tensor, vad_timestamps)
+        timestamps, wav_tensor = get_vad_timestamps(audio_bytes)
     else:
         # Need wav_tensor for transcription
+        # Convert bytes to tensor without loading Silero VAD
         audio_stream = io.BytesIO(audio_bytes)
-        # Using silero's read_audio utility for consistency
-        _, utils = torch.hub.load(
-            repo_or_dir='snakers4/silero-vad', model='silero_vad')
-        read_audio = utils[2]
-        wav_tensor = read_audio(audio_stream, sampling_rate=16000)
+        with wave.open(audio_stream, 'rb') as wav_file:
+            params = wav_file.getparams()
+            frames = wav_file.readframes(params.nframes)
+            audio_np = np.frombuffer(
+                frames, dtype=np.int16).astype(np.float32) / 32768.0
+            wav_tensor = torch.from_numpy(audio_np)
 
     segments = transcribe_fragments(wav_tensor, timestamps)
 
-    jp_srt = os.path.join(output_dir, "jp.srt")
-    zh_srt = os.path.join(output_dir, "zh.srt")
+    source_srt = os.path.join(output_dir, f"{SOURCE_LANG}.srt")
+    dest_srt = os.path.join(output_dir, "translated.srt")
 
-    save_srt(segments, jp_srt)
-    print(f"Saved Japanese subtitles to {jp_srt}")
+    save_srt(segments, source_srt)
+    print(f"Saved {SOURCE_LANG} subtitles to {source_srt}")
 
-    translate_srt(jp_srt, zh_srt, context)
-    print(f"Saved Traditional Chinese subtitles to {zh_srt}")
+    translate_srt(source_srt, dest_srt, context)
+    print(f"Saved {DEST_LANG} subtitles to {dest_srt}")
 
 
 if __name__ == "__main__":
