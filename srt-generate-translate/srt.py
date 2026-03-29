@@ -302,6 +302,16 @@ def transcribe_one(client, i, ts, wav_tensor, total):
         # SenseVoice might include language tags like <|zh|>, remove them if present
         import re
         text = re.sub(r'<\|.*?\|>', '', text).strip()
+
+        # Check for repeating characters (e.g., "aaaaaaaaaa...")
+        if len(text) > 10 and len(set(text)) == 1:
+            print(
+                f"Warning: Segment {i+1} contains repeating characters. Cropping to 10 chars.")
+            text = text[:10]
+        elif len(text) > 100:
+            print(
+                f"Warning: Segment {i+1} text too long ({len(text)} chars). Cropping to 100 chars.")
+            text = text[:100]
         return {
             'index': i,
             'start': ts['start'] / 16000,
@@ -330,6 +340,16 @@ def transcribe_one(client, i, ts, wav_tensor, total):
             language=language,
         )
         text = results[0].text.strip()
+
+        # Check for repeating characters (e.g., "aaaaaaaaaa...")
+        if len(text) > 10 and len(set(text)) == 1:
+            print(
+                f"Warning: Segment {i+1} contains repeating characters. Cropping to 10 chars.")
+            text = text[:10]
+        elif len(text) > 100:
+            print(
+                f"Warning: Segment {i+1} text too long ({len(text)} chars). Cropping to 100 chars.")
+            text = text[:100]
         return {
             'index': i,
             'start': ts['start'] / 16000,
@@ -348,6 +368,7 @@ def transcribe_one(client, i, ts, wav_tensor, total):
 
     print(f"Transcribing fragment {i+1}/{total} ({ts['start']/16000:.2f}s)...")
     try:
+        # Use streaming to enforce a total timeout including response generation time
         response = client.chat.completions.create(
             model=ASR_MODEL,
             messages=[{
@@ -357,11 +378,33 @@ def transcribe_one(client, i, ts, wav_tensor, total):
                         "data": audio_b64, "format": "wav"}}
                 ]
             }],
-            extra_body={"chat_template_kwargs": {"language": SOURCE_LANG}}
+            extra_body={"chat_template_kwargs": {"language": SOURCE_LANG}},
+            stream=True,
+            timeout=15.0
         )
-        text = response.choices[0].message.content
+
+        text = ""
+        start_time = time.time()
+        for chunk in response:
+            if time.time() - start_time > 15.0:
+                print(
+                    f"Warning: Segment {i+1} ASR request timed out during generation (>15s).")
+                break
+            if chunk.choices[0].delta.content:
+                text += chunk.choices[0].delta.content
         if '<asr_text>' in text:
             text = text.split('<asr_text>')[1].strip()
+        text = text.strip()
+
+        # Check for repeating characters (e.g., "aaaaaaaaaa...")
+        if len(text) > 10 and len(set(text)) == 1:
+            print(
+                f"Warning: Segment {i+1} contains repeating characters. Cropping to 10 chars.")
+            text = text[:10]
+        elif len(text) > 100:
+            print(
+                f"Warning: Segment {i+1} text too long ({len(text)} chars). Cropping to 100 chars.")
+            text = text[:100]
         return {
             'index': i,
             'start': ts['start'] / 16000,
@@ -370,10 +413,33 @@ def transcribe_one(client, i, ts, wav_tensor, total):
         }
     except Exception as e:
         print(f"Error transcribing fragment {i}: {e}")
-        return None
+        # If timeout or other error, return empty string as requested
+        return {
+            'index': i,
+            'start': ts['start'] / 16000,
+            'end': ts['end'] / 16000,
+            'text': ""
+        }
 
 
 def transcribe_fragments(wav_tensor, timestamps, stats_callback=None):
+    # Cap each segment to be 15 seconds max.
+    # If a segment is longer than 15 seconds, it's likely glitched; crop it to 15s.
+    MAX_SEGMENT_DURATION_S = 15.0
+    MAX_SEGMENT_SAMPLES = int(MAX_SEGMENT_DURATION_S * 16000)
+
+    processed_timestamps = []
+    for ts in timestamps:
+        start = ts['start']
+        end = ts['end']
+        duration_samples = end - start
+        if duration_samples > MAX_SEGMENT_SAMPLES:
+            print(
+                f"Warning: Segment at {start/16000:.2f}s is {duration_samples/16000:.2f}s long (exceeds 15s). Cropping to 15s.")
+            ts['end'] = start + MAX_SEGMENT_SAMPLES
+        processed_timestamps.append(ts)
+
+    timestamps = processed_timestamps
     total = len(timestamps)
     completed = 0
 
