@@ -929,39 +929,6 @@ class ASRGui(ctk.CTk):
                 "invalid_device_id", "Invalid device ID"))
             return
 
-        hotkey = self.hotkey_option.get()
-        backend = self.backend_option.get()
-
-        # Update config in memory
-        self.config["hotkey"] = hotkey
-        self.config["asr_backend"] = backend
-
-        if "glm" not in self.config:
-            self.config["glm"] = {}
-        self.config["glm"]["system_prompt"] = self.system_prompt_entry.get()
-
-        if "sensevoice" not in self.config:
-            self.config["sensevoice"] = {}
-        try:
-            self.config["sensevoice"]["num_threads"] = int(
-                self.threads_entry.get())
-        except:
-            pass
-        self.config["sensevoice"]["language"] = self.sv_lang_option.get()
-        self.config["sensevoice"]["provider"] = self.provider_option.get()
-
-        if "whisper" not in self.config:
-            self.config["whisper"] = {}
-        self.config["whisper"]["device"] = self.whisper_device_option.get()
-        self.config["whisper"]["language"] = self.whisper_lang_option.get()
-        self.config["whisper"]["task"] = self.whisper_task_option.get()
-
-        if "qwen_asr" not in self.config:
-            self.config["qwen_asr"] = {}
-        self.config["qwen_asr"]["device"] = self.qwen_device_option.get()
-        self.config["qwen_asr"]["language"] = self.qwen_lang_option.get()
-        self.config["qwen_asr"]["model_id"] = self.qwen_model_option.get()
-
         self.transition_to(AppState.STARTING)
 
         self.client_thread = threading.Thread(
