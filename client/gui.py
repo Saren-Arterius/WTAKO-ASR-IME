@@ -351,14 +351,14 @@ class ASRGui(ctk.CTk):
         # Qwen vLLM specific settings
         self.qwen_vllm_frame = ctk.CTkFrame(
             self.settings_frame, fg_color="transparent")
-        self.qwen_vllm_frame.grid(row=6, column=0, columnspan=2, sticky="ew")
+        self.qwen_vllm_frame.grid(row=5, column=0, columnspan=2, sticky="ew")
         self.qwen_vllm_frame.grid_columnconfigure(1, weight=1)
 
         ctk.CTkLabel(self.qwen_vllm_frame, text=self.i18n.get("qwen_vllm_url", "vLLM URL:")).grid(
-            row=0, column=0, padx=10, pady=5, sticky="w")
+            row=3, column=0, padx=10, pady=5, sticky="w")
         self.qwen_vllm_url_entry = ctk.CTkEntry(self.qwen_vllm_frame)
         self.qwen_vllm_url_entry.grid(
-            row=0, column=1, padx=10, pady=5, sticky="ew")
+            row=3, column=1, padx=10, pady=5, sticky="ew")
         self.qwen_vllm_url_entry.insert(0, self.config.get(
             "qwen_asr", {}).get("base_url", "http://localhost:8003/v1"))
 
