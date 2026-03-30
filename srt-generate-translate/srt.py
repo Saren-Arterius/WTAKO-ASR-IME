@@ -143,7 +143,8 @@ def wav_bytes_to_input_dict(audio_bytes):
     with wave.open(audio_stream, 'rb') as wav_file:
         sample_rate = wav_file.getframerate()
         frames = wav_file.readframes(wav_file.getnframes())
-        audio_np = np.frombuffer(frames, dtype=np.int16).astype(np.float32) / 32768.0
+        audio_np = np.frombuffer(
+            frames, dtype=np.int16).astype(np.float32) / 32768.0
         waveform = torch.from_numpy(audio_np).unsqueeze(0)  # (channel, time)
     return {"waveform": waveform, "sample_rate": sample_rate}
 
@@ -411,7 +412,10 @@ def transcribe_one(client, i, ts, wav_tensor, total):
                         "data": audio_b64, "format": "wav"}}
                 ]
             }],
-            extra_body={"chat_template_kwargs": {"language": SOURCE_LANG}},
+            extra_body={
+                "chat_template_kwargs": {"language": SOURCE_LANG},
+                "repetition_penalty": 1.5
+            },
             stream=True,
             timeout=15.0
         )
@@ -533,24 +537,34 @@ def get_translation_prompt(source_lang, dest_lang, lines, context=""):
     }
     source_name = lang_map.get(source_lang, source_lang)
 
-    # Format lines as a numbered list for the LLM
-    formatted_lines = "\n".join(
-        [f"{i+1}. {line}" for i, line in enumerate(lines)])
+    # Format lines as a JSON object for the LLM
+    input_data = {str(i+1): line for i, line in enumerate(lines)}
+    formatted_json = json.dumps(input_data, ensure_ascii=False, indent=2)
 
     prompt = f"""You are an expert translator specializing in {source_name} to {dest_lang} localization.
 
 CRITICAL INSTRUCTIONS:
 1. TRANSLATE ALL {source_name} text into natural, idiomatic {dest_lang}. 
 2. DO NOT leave any {source_name} sentences or phrases untranslated in the output.
-3. Maintain the exact same number of lines in the output.
-4. Output ONLY the translated lines, one per line, without the original numbering or timestamps.
+3. Output the translations in a JSON object where the keys are the original indices.
+4. If you feel multiple consecutive lines should be combined into one subtitle for better flow, use a range key like "1-2".
+   Example:
+   Input:
+   {{
+     "1": "Hello.",
+     "2": "How are you?"
+   }}
+   Output:
+   {{
+     "1-2": "你好。最近怎麼樣？"
+   }}
 5. Use {dest_lang} characters and style.
 {f'6. Additional Context/Instructions: {context}' if context else ''}
 
-Input {source_name} lines:
-{formatted_lines}
+Input {source_name} JSON:
+{formatted_json}
 
-Output {dest_lang} lines:"""
+Output {dest_lang} JSON:"""
     return prompt
 
 
@@ -562,6 +576,7 @@ def translate_chunk(client, lines, converter, context="", stats_callback=None, c
             model=LLM_MODEL,
             messages=[{"role": "user", "content": prompt}],
             temperature=0.1,
+            extra_body={"repetition_penalty": 1.1},
             stream=True
         )
 
@@ -573,20 +588,28 @@ def translate_chunk(client, lines, converter, context="", stats_callback=None, c
             if chunk.choices[0].delta.content:
                 if start_time is None:
                     start_time = time.time()
-
                 content = chunk.choices[0].delta.content
                 full_content += content
-                token_count += 1  # Rough estimate per chunk
+                token_count += 1
                 if stats_callback:
-                    # Pass current token count and elapsed time for real-time TPS
                     stats_callback(chunk_id, token_count,
                                    time.time() - start_time, full_content)
 
-        translated = full_content.strip()
-        return converter.convert(translated)
+        # Extract JSON from response
+        import re
+        json_match = re.search(r'\{.*\}', full_content, re.DOTALL)
+        if json_match:
+            translated_data = json.loads(json_match.group(0))
+            # Convert back to a format translate_srt expects (one line per original line)
+            # but we'll actually change translate_srt to handle this dict.
+            return converter.convert(json.dumps(translated_data, ensure_ascii=False))
+        else:
+            print(f"Warning: No JSON found in chunk {chunk_id} response")
+            return converter.convert(full_content)
+
     except Exception as e:
         print(f"Chunk translation error: {e}")
-        return chunk_content.strip()
+        return ""
 
 
 def parse_srt(content):
@@ -671,21 +694,55 @@ def translate_srt(input_path, output_path, context="", stats_callback=None):
         global_idx = 1
         for chunk_idx, result_text in enumerate(translated_results):
             original_chunk_blocks = chunks_data[chunk_idx]
-            translated_lines = [l.strip()
-                                for l in result_text.split('\n') if l.strip()]
 
-            # If LLM returned wrong number of lines, we might need to handle it,
-            # but for now we'll try to match them.
-            for i, block in enumerate(original_chunk_blocks):
+            processed_translations = {}
+            skip_indices = set()
+
+            try:
+                translated_data = json.loads(result_text)
+                for key, text in translated_data.items():
+                    import re
+                    match = re.match(r'^(\d+)(?:-(\d+))?$', str(key))
+                    if match:
+                        start_idx = int(match.group(1)) - 1
+                        end_idx = int(match.group(2)) - \
+                            1 if match.group(2) else start_idx
+
+                        processed_translations[start_idx] = {
+                            'text': text,
+                            'end_idx': end_idx
+                        }
+                        if end_idx > start_idx:
+                            print(
+                                f"\n[Chunk {chunk_idx}] LLM combined lines {start_idx+1}-{end_idx+1}: {text}")
+                        for j in range(start_idx + 1, end_idx + 1):
+                            skip_indices.add(j)
+            except Exception as e:
+                print(f"Error parsing JSON from chunk {chunk_idx}: {e}")
+
+            i = 0
+            while i < len(original_chunk_blocks):
+                if i in skip_indices:
+                    i += 1
+                    continue
+
                 f.write(f"{global_idx}\n")
-                f.write(f"{block['timestamp']}\n")
-                # Use translated line if available, else original
-                text = translated_lines[i] if i < len(
-                    translated_lines) else block['text']
-                # Remove any leading "1. " etc if LLM ignored instructions
-                import re
-                text = re.sub(r'^\d+\.\s*', '', text)
-                f.write(f"{text}\n\n")
+                if i in processed_translations:
+                    info = processed_translations[i]
+                    end_idx = min(info['end_idx'], len(
+                        original_chunk_blocks) - 1)
+                    start_ts = original_chunk_blocks[i]['timestamp'].split(
+                        ' --> ')[0]
+                    end_ts = original_chunk_blocks[end_idx]['timestamp'].split(
+                        ' --> ')[1]
+                    f.write(f"{start_ts} --> {end_ts}\n")
+                    f.write(f"{info['text']}\n\n")
+                    i = end_idx + 1
+                else:
+                    block = original_chunk_blocks[i]
+                    f.write(f"{block['timestamp']}\n")
+                    f.write(f"{block['text']}\n\n")
+                    i += 1
                 global_idx += 1
 
 
@@ -762,8 +819,14 @@ def main():
         os.environ["HF_TOKEN"] = HF_TOKEN
 
     for video_file in args.video_files:
-        print(f"\nProcessing: {video_file}")
         base_path = os.path.splitext(video_file)[0]
+        dest_srt = f"{base_path}.translated.srt"
+
+        if os.path.exists(dest_srt):
+            print(f"\nSkipping: {video_file} (Already translated: {dest_srt})")
+            continue
+
+        print(f"\nProcessing: {video_file}")
 
         audio_bytes = extract_audio(video_file)
 
