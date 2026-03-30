@@ -134,6 +134,8 @@ uv run server/server.py --port 8000 --backend sensevoice
 
 ## SRT Generate & Translate Installation
 
+![Screenshot SRT](screenshot-srt.jpg)
+
 1. **Use the same Python environment/dependencies as above**.
 
 2. **Diarization prerequisites (SRT tool)**:
