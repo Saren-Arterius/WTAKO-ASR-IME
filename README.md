@@ -205,7 +205,7 @@ For better subtitle quality, you can enable more advanced components:
 
 - **Stronger LLM translation**
   - Faster option: **Qwen3.5 35B-A3B** (AMD iGPU laptop can finish translation in **under ~90s**)
-  - More accurate option: **27B** (RTX 4090 around **~30s**)
+  - More accurate option: **Qwen3.5 27B** (RTX 4090 around **~30s**)
   - If RAM is below 32 GB, or you need faster and more accurate output, use a cloud model endpoint.
 
 Example `llama-server` launch for local Qwen3.5-35B-A3B:
