@@ -213,8 +213,10 @@ class SRTGui(ctk.CTk, TkinterDnD.DnDWrapper if HAS_DND else object):
         self.llm_model = ctk.CTkEntry(settings_tab)
         self.llm_model.grid(row=7, column=1, padx=10, pady=5, sticky="ew")
 
-        self.llm_api_key_label = ctk.CTkLabel(settings_tab, text="LLM API Key:")
-        self.llm_api_key_label.grid(row=8, column=0, padx=10, pady=5, sticky="w")
+        self.llm_api_key_label = ctk.CTkLabel(
+            settings_tab, text="LLM API Key:")
+        self.llm_api_key_label.grid(
+            row=8, column=0, padx=10, pady=5, sticky="w")
         self.llm_api_key = ctk.CTkEntry(settings_tab, show="*")
         self.llm_api_key.grid(row=8, column=1, padx=10, pady=5, sticky="ew")
 
@@ -258,7 +260,8 @@ class SRTGui(ctk.CTk, TkinterDnD.DnDWrapper if HAS_DND else object):
         self.min_speakers = ctk.CTkEntry(adv_tab)
         self.min_speakers.grid(row=2, column=1, padx=10, pady=5, sticky="w")
 
-        self.prompt_preview_label = ctk.CTkLabel(adv_tab, text="Prompt Preview:")
+        self.prompt_preview_label = ctk.CTkLabel(
+            adv_tab, text="Prompt Preview:")
         self.prompt_preview_label.grid(
             row=3, column=0, padx=10, pady=5, sticky="nw")
         self.prompt_preview = ctk.CTkTextbox(adv_tab, height=150)
@@ -368,10 +371,14 @@ class SRTGui(ctk.CTk, TkinterDnD.DnDWrapper if HAS_DND else object):
         self.llm_api_key_label.grid()
         self.llm_api_key.grid()
         self.context_label.grid(row=2, column=0, sticky="w", padx=10)
-        self.context_entry.grid(row=3, column=0, padx=10, pady=(0, 10), sticky="ew")
-        self.prompt_preview_label.grid(row=3, column=0, padx=10, pady=5, sticky="nw")
-        self.prompt_preview.grid(row=3, column=1, padx=10, pady=5, sticky="nsew")
-        self.update_preview_btn.grid(row=4, column=1, padx=10, pady=5, sticky="e")
+        self.context_entry.grid(row=3, column=0, padx=10,
+                                pady=(0, 10), sticky="ew")
+        self.prompt_preview_label.grid(
+            row=3, column=0, padx=10, pady=5, sticky="nw")
+        self.prompt_preview.grid(
+            row=3, column=1, padx=10, pady=5, sticky="nsew")
+        self.update_preview_btn.grid(
+            row=4, column=1, padx=10, pady=5, sticky="e")
 
     def update_asr_visibility(self, backend):
         # Update source language options based on backend
@@ -647,11 +654,17 @@ class SRTGui(ctk.CTk, TkinterDnD.DnDWrapper if HAS_DND else object):
                     break
 
                 base_name = os.path.basename(video_file)
+                base_path = os.path.splitext(video_file)[0]
+                dest_srt = f"{base_path}.translated.srt"
+
+                if os.path.exists(dest_srt):
+                    print(f"Skipping {base_name} (Already translated)")
+                    self.progress_bar.set((i + 1) / total)
+                    continue
+
                 self.update_status(f"Processing {i+1}/{total}: {base_name}")
 
-                base_path = os.path.splitext(video_file)[0]
                 source_srt = f"{base_path}.{srt.SOURCE_LANG}.srt"
-                dest_srt = f"{base_path}.translated.srt"
 
                 video_start_time = time.perf_counter()
                 stage_times = {
@@ -715,7 +728,8 @@ class SRTGui(ctk.CTk, TkinterDnD.DnDWrapper if HAS_DND else object):
                             frames, dtype=np.int16).astype(np.float32) / 32768.0
                         wav_tensor = torch.from_numpy(audio_np)
 
-                stage_times["diarization_vad"] = time.perf_counter() - stage_start_time
+                stage_times["diarization_vad"] = time.perf_counter() - \
+                    stage_start_time
                 self.after(0, lambda: self.sub_progress_bar.set(0.1))
 
                 # Unload Diarization/VAD models before transcription if requested
@@ -730,7 +744,8 @@ class SRTGui(ctk.CTk, TkinterDnD.DnDWrapper if HAS_DND else object):
                 segments = srt.transcribe_fragments(
                     wav_tensor, timestamps, stats_callback=self.update_transcription_progress)
                 srt.save_srt(segments, source_srt)
-                stage_times["transcribe"] = time.perf_counter() - stage_start_time
+                stage_times["transcribe"] = time.perf_counter() - \
+                    stage_start_time
 
                 # Unload ASR models before translation if requested
                 if self.unload_models_var.get():
@@ -752,7 +767,8 @@ class SRTGui(ctk.CTk, TkinterDnD.DnDWrapper if HAS_DND else object):
                     stage_start_time = time.perf_counter()
                     srt.translate_srt(source_srt, dest_srt, context,
                                       stats_callback=self.update_tps)
-                    stage_times["translate"] = time.perf_counter() - stage_start_time
+                    stage_times["translate"] = time.perf_counter() - \
+                        stage_start_time
 
                     # Delete original SRT if not requested
                     if not self.config.get("save_origin_srt", True):
