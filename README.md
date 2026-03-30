@@ -7,6 +7,15 @@
 
 A real-time Speech-to-Text (STT) system specifically optimized for **Cantonese** users, providing high-accuracy transcription for dialects. It supports multiple backends (GLM-ASR, SenseVoice) and local or remote ASR processing, making it ideal for offloading computation to a more powerful machine (like an AMD laptop with a GPU/NPU).
 
+This repository contains **two tools**:
+
+- **ASR IME**: Real-time speech input with hotkey-triggered recording, VAD, and automatic typing into the active window.
+- **SRT Generate & Translate**: A standalone subtitle workflow that:
+  - extracts/segments speech from video/audio,
+  - generates source-language subtitles,
+  - optionally runs speaker diarization (pyannote),
+  - translates subtitles with LLM backends.
+
 ## Project Structure
 
 ```
@@ -28,7 +37,7 @@ A real-time Speech-to-Text (STT) system specifically optimized for **Cantonese**
 └── README.md
 ```
 
-## Features
+## ASR IME Features
 
 - **Multi-Backend Support**: Choose between different ASR backends:
     - **GLM-ASR**: Powered by [GLM-ASR-Nano-2512](https://huggingface.co/zai-org/GLM-ASR-Nano-2512), a 1.5B parameter model that outperforms Whisper V3 on multiple benchmarks with exceptional dialect support (Mandarin, Cantonese, English).
@@ -42,90 +51,73 @@ A real-time Speech-to-Text (STT) system specifically optimized for **Cantonese**
 - **Traditional Chinese Support**: Built-in Simplified to Traditional Chinese conversion (OpenCC).
 - **Multi-language UI**: Supports English and Traditional Chinese (auto-detected or configurable).
 - **Distributed Architecture**: Run the ASR model on a separate machine to save resources on your main workstation.
-- **SRT Generation & Translation**: A dedicated tool to automatically generate subtitles from video files and translate them using LLM backends, with support for batch processing and context-aware translation.
 
-## Installation
+## ASR IME Installation
 
-1.  **Clone the repository**:
-    ```bash
-    git clone https://github.com/Saren-Arterius/WTAKO-ASR-IME.git
-    cd WTAKO-ASR-IME
-    ```
+1. **Clone the repository**:
+   ```bash
+   git clone https://github.com/Saren-Arterius/WTAKO-ASR-IME.git
+   cd WTAKO-ASR-IME
+   ```
 
-2.  **Install dependencies**:
+2. **Install system dependencies (Ubuntu/Debian)**:
+   ```bash
+   sudo apt update
+   sudo apt install portaudio19-dev libuinput-dev pulseaudio-utils pipewire-bin
+   ```
 
-    **System Dependencies (Ubuntu/Debian)**:
-    ```bash
-    sudo apt update
-    sudo apt install portaudio19-dev libuinput-dev pulseaudio-utils pipewire-bin
-    ```
+3. **Install Python dependencies** (using [uv](https://github.com/astral-sh/uv)):
 
-    **Python Dependencies**:
-    This project uses [uv](https://github.com/astral-sh/uv) for fast dependency management.
+   **NVIDIA (CUDA)**:
+   ```bash
+   uv pip install torch torchaudio torchvision torchcodec
+   uv pip install -r requirements.txt
+   ```
 
-    **NVIDIA (CUDA)**:
-    ```bash
-    uv pip install -r requirements.txt
-    ```
+   **AMD (ROCm)**:
+   ```bash
+   uv pip install torch==2.9.1 torchvision==0.24.1 torchaudio==2.9.1 --index-url https://download.pytorch.org/whl/rocm6.4
+   uv pip install rocrand
+   uv pip install -r requirements.txt
+   ```
 
-    **AMD (ROCm)**:
-    ```bash
-    uv pip install -r requirements.txt --extra-index-url https://download.pytorch.org/whl/rocm7.2
-    ```
+   *ROCm notes:*
+   - `rocrand` is required for diarization.
+   - Keep `torchaudio` at `<=2.9.0` for compatibility.
+   - For some AMD GPUs (like RX 680M), you may need:
+   ```bash
+   export HSA_OVERRIDE_GFX_VERSION=10.3.0
+   ```
 
-    *Note: For some AMD GPUs (like RX 680M), you may need to override the GFX version:*
-    ```bash
-    export HSA_OVERRIDE_GFX_VERSION=10.3.5
-    ```
+4. **Setup `uinput` permissions (ASR IME only)**:
+   ```bash
+   sudo modprobe uinput
+   sudo usermod -aG input $USER
+   ```
+   Then logout/login for group changes to take effect.
 
-3.  **Download SenseVoice Model (Optional)**:
-    The SenseVoice backend will automatically download the required models on first run. If you prefer to download them manually:
-    ```bash
-    curl -SL -O https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17.tar.bz2
-    tar xvf sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17.tar.bz2
-    rm sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17.tar.bz2
-    ```
+5. **Setup sudoers for global hotkey (ASR IME only)**:
+   Run `sudo visudo` and add:
+   ```bash
+   your_username ALL=(ALL) NOPASSWD: /path/to/python /path/to/project/client/keyboard_listener.py *
+   ```
 
-4.  **Setup uinput permissions**:
-    To allow the application to emulate keyboard input without running everything as root:
-    ```bash
-    sudo modprobe uinput
-    sudo usermod -aG input $USER
-    # You may need to logout and login for group changes to take effect
-    ```
-    Alternatively, ensure your user has write access to `/dev/uinput` (e.g., `sudo chmod 666 /dev/uinput`).
+6. **Configure ASR IME**:
+   Edit `client/config.json` manually or via GUI.
 
-5.  **Setup Sudoers for Global Hotkey**:
-    The global hotkey listener requires `sudo` to access raw input devices. To avoid being prompted for a password every time you start the client, add a `sudoers` entry. Run `sudo visudo` and add the following line at the end (replacing `/path/to/python` and `/path/to/project` with your actual paths):
+## ASR IME Usage
 
-    ```bash
-    # Allow running the keyboard listener without a password
-    your_username ALL=(ALL) NOPASSWD: /path/to/python /path/to/project/client/keyboard_listener.py *
-    ```
-    *Note: You can find your python path by running `which python`.*
-
-6.  **Configure**:
-    The application will create/update `client/config.json` automatically. You can also edit it manually or via the GUI.
-
-## Usage
-
-### 1. GUI Mode (Recommended)
-
-The GUI provides a convenient way to manage settings and see transcriptions in real-time.
-
+### GUI (recommended)
 ```bash
 ./start-gui.sh
 ```
 
-**For AMD ROCm users (if override is needed):**
+For AMD ROCm override if needed:
 ```bash
 ./start-gui.sh --gfx 10.3.5
 ```
 
-### 2. CLI Mode
-
-For a lightweight experience, you can run the CLI client.
-
+### CLI client
 ```bash
 # Local ASR
 uv run client/main.py
@@ -134,10 +126,7 @@ uv run client/main.py
 uv run client/main.py --asr-server http://<server-ip>:8000
 ```
 
-### 3. Standalone Server
-
-If you want to run the ASR server on a different machine:
-
+### Standalone server
 ```bash
 # Default (GLM)
 uv run server/server.py --port 8000
@@ -146,17 +135,40 @@ uv run server/server.py --port 8000
 uv run server/server.py --port 8000 --backend sensevoice
 ```
 
-### 4. SRT Generation & Translation Tool
+## SRT Generate & Translate Installation
 
-To use the subtitle generation and translation tool:
+1. **Use the same Python environment/dependencies as above**.
 
+2. **Diarization prerequisites (SRT tool)**:
+   - Set `HF_TOKEN` before running diarization.
+   - Your Hugging Face account must have access to:
+     `https://huggingface.co/pyannote/speaker-diarization-community-1`
+
+3. **SenseVoice model (optional for both ASR IME and SRT tool)**:
+   The backend can auto-download on first run, or download manually:
+   ```bash
+   curl -SL -O https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17.tar.bz2
+   tar xvf sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17.tar.bz2
+   rm sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17.tar.bz2
+   ```
+
+4. `uinput` and global hotkey are **ASR IME only** and not required for SRT generation/translation.
+
+## SRT Generate & Translate Usage
+
+### GUI
 ```bash
 uv run srt-generate-translate/gui.py
 ```
 
+### CLI
+```bash
+uv run srt-generate-translate/srt.py --help
+```
+
 > [!TIP]
-> **Font Issues with `uv`**: If you find that the GUI only displays a "fixed" font and cannot show CJK characters correctly, it's likely because `uv`'s portable Python binaries are not integrated with your system's font configuration. 
-> 
+> **Font Issues with `uv`**: If you find that the GUI only displays a "fixed" font and cannot show CJK characters correctly, it's likely because `uv`'s portable Python binaries are not integrated with your system's font configuration.
+>
 > To fix this, recreate your virtual environment using the system's Python:
 > ```bash
 > rm -rf .venv
@@ -166,7 +178,17 @@ uv run srt-generate-translate/gui.py
 
 ## Configuration
 
-Settings can be adjusted via the GUI or by editing `client/config.json`:
+`client/config.json` and `srt-generate-translate/srt_config.json` are different and unrelated:
+
+- **`client/config.json` (ASR IME only)**  
+  Controls realtime input behavior for the IME client (e.g., `audio_devices`, `hotkey`, typing/system prompt behavior, UI language, sound settings).
+
+- **`srt-generate-translate/srt_config.json` (SRT tool only)**  
+  Controls subtitle pipeline settings (e.g., `ASR_API_URL`, `ASR_MODEL`, `ASR_BACKEND`, `SOURCE_LANG`, `DEST_LANG`, `LLM_API_URL`, `LLM_MODEL`, merge/diarization options, `video_files`, translation `context`, and SRT save/debug flags).
+
+Changes in one config file do **not** affect the other tool.
+
+ASR IME settings can be adjusted via GUI or by editing `client/config.json`:
 
 - `audio_devices`: List of substrings to match your preferred microphone.
 - `hotkey`: The key used to trigger recording (e.g., `f12`, `caps lock`).
