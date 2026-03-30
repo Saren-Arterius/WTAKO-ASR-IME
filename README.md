@@ -99,7 +99,15 @@ This repository contains **two tools**:
    your_username ALL=(ALL) NOPASSWD: /path/to/python /path/to/project/client/keyboard_listener.py *
    ```
 
-6. **Configure ASR IME**:
+6. **SenseVoice model (optional for both ASR IME and SRT tool)**:
+   The backend can auto-download on first run, or download manually:
+   ```bash
+   curl -SL -O https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17.tar.bz2
+   tar xvf sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17.tar.bz2
+   rm sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17.tar.bz2
+   ```
+
+7. **Configure ASR IME**:
    Edit `client/config.json` manually or via GUI.
 
 ## ASR IME Usage
@@ -142,16 +150,6 @@ uv run server/server.py --port 8000 --backend sensevoice
    - Set `HF_TOKEN` before running diarization.
    - Your Hugging Face account must have access to:
      `https://huggingface.co/pyannote/speaker-diarization-community-1`
-
-3. **SenseVoice model (optional for both ASR IME and SRT tool)**:
-   The backend can auto-download on first run, or download manually:
-   ```bash
-   curl -SL -O https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17.tar.bz2
-   tar xvf sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17.tar.bz2
-   rm sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17.tar.bz2
-   ```
-
-4. `uinput` and global hotkey are **ASR IME only** and not required for SRT generation/translation.
 
 ## SRT Generate & Translate Usage
 
