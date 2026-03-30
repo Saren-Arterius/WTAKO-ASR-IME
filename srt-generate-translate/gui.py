@@ -26,6 +26,8 @@ DEFAULT_CONFIG = {
     "DEST_LANG": "Traditional Chinese (Taiwan/Hong Kong style)",
     "LLM_API_URL": "http://100.64.0.8:8000/v1",
     "LLM_MODEL": "Intel/Qwen3-Coder-Next-int4-AutoRound",
+    "LLM_API_KEY": "",
+    "skip_translation": False,
     "merge_duration": 0.5,
     "merge_duration_force": 0.2,
     "min_speakers": 0,
@@ -185,40 +187,56 @@ class SRTGui(ctk.CTk, TkinterDnD.DnDWrapper if HAS_DND else object):
             settings_tab, text="Custom Lang:")
         self.custom_lang = ctk.CTkEntry(settings_tab)
 
-        ctk.CTkLabel(settings_tab, text="Dest Lang:").grid(
-            row=4, column=0, padx=10, pady=5, sticky="w")
+        self.dest_lang_label = ctk.CTkLabel(settings_tab, text="Dest Lang:")
+        self.dest_lang_label.grid(row=4, column=0, padx=10, pady=5, sticky="w")
         self.dest_lang = ctk.CTkEntry(settings_tab)
         self.dest_lang.grid(row=4, column=1, padx=10, pady=5, sticky="ew")
 
-        ctk.CTkLabel(settings_tab, text="LLM URL:").grid(
-            row=5, column=0, padx=10, pady=5, sticky="w")
-        self.llm_url = ctk.CTkEntry(settings_tab)
-        self.llm_url.grid(row=5, column=1, padx=10, pady=5, sticky="ew")
+        self.skip_translation_var = ctk.BooleanVar(
+            value=self.config.get("skip_translation", False))
+        self.skip_translation_checkbox = ctk.CTkCheckBox(
+            settings_tab,
+            text="Skip LLM Translation (Generate source-language SRT only)",
+            variable=self.skip_translation_var,
+            command=self.update_llm_visibility
+        )
+        self.skip_translation_checkbox.grid(
+            row=5, column=0, columnspan=2, padx=10, pady=10, sticky="w")
 
-        ctk.CTkLabel(settings_tab, text="LLM Model:").grid(
-            row=6, column=0, padx=10, pady=5, sticky="w")
+        self.llm_url_label = ctk.CTkLabel(settings_tab, text="LLM URL:")
+        self.llm_url_label.grid(row=6, column=0, padx=10, pady=5, sticky="w")
+        self.llm_url = ctk.CTkEntry(settings_tab)
+        self.llm_url.grid(row=6, column=1, padx=10, pady=5, sticky="ew")
+
+        self.llm_model_label = ctk.CTkLabel(settings_tab, text="LLM Model:")
+        self.llm_model_label.grid(row=7, column=0, padx=10, pady=5, sticky="w")
         self.llm_model = ctk.CTkEntry(settings_tab)
-        self.llm_model.grid(row=6, column=1, padx=10, pady=5, sticky="ew")
+        self.llm_model.grid(row=7, column=1, padx=10, pady=5, sticky="ew")
+
+        self.llm_api_key_label = ctk.CTkLabel(settings_tab, text="LLM API Key:")
+        self.llm_api_key_label.grid(row=8, column=0, padx=10, pady=5, sticky="w")
+        self.llm_api_key = ctk.CTkEntry(settings_tab, show="*")
+        self.llm_api_key.grid(row=8, column=1, padx=10, pady=5, sticky="ew")
 
         self.use_diarization_var = ctk.BooleanVar(
             value=self.config.get("use_diarization", True))
         self.diarization_checkbox = ctk.CTkCheckBox(settings_tab, text="Use Speaker Diarization (Recommended)",
                                                     variable=self.use_diarization_var)
         self.diarization_checkbox.grid(
-            row=7, column=0, columnspan=2, padx=10, pady=10, sticky="w")
+            row=9, column=0, columnspan=2, padx=10, pady=10, sticky="w")
 
         ctk.CTkLabel(settings_tab, text="HF Token:").grid(
-            row=8, column=0, padx=10, pady=5, sticky="w")
+            row=10, column=0, padx=10, pady=5, sticky="w")
         self.hf_token = ctk.CTkEntry(
             settings_tab, show="*")
-        self.hf_token.grid(row=8, column=1, padx=10, pady=5, sticky="ew")
+        self.hf_token.grid(row=10, column=1, padx=10, pady=5, sticky="ew")
 
         self.unload_models_var = ctk.BooleanVar(
             value=self.config.get("unload_models_after_use", False))
         self.unload_checkbox = ctk.CTkCheckBox(settings_tab, text="Unload Models After Use (Save VRAM)",
                                                variable=self.unload_models_var)
         self.unload_checkbox.grid(
-            row=9, column=0, columnspan=2, padx=10, pady=10, sticky="w")
+            row=11, column=0, columnspan=2, padx=10, pady=10, sticky="w")
 
         # Advanced Tab
         adv_tab = self.settings_tab.tab("Advanced")
@@ -240,7 +258,8 @@ class SRTGui(ctk.CTk, TkinterDnD.DnDWrapper if HAS_DND else object):
         self.min_speakers = ctk.CTkEntry(adv_tab)
         self.min_speakers.grid(row=2, column=1, padx=10, pady=5, sticky="w")
 
-        ctk.CTkLabel(adv_tab, text="Prompt Preview:").grid(
+        self.prompt_preview_label = ctk.CTkLabel(adv_tab, text="Prompt Preview:")
+        self.prompt_preview_label.grid(
             row=3, column=0, padx=10, pady=5, sticky="nw")
         self.prompt_preview = ctk.CTkTextbox(adv_tab, height=150)
         self.prompt_preview.grid(
@@ -306,6 +325,7 @@ class SRTGui(ctk.CTk, TkinterDnD.DnDWrapper if HAS_DND else object):
             "DEST_LANG", "Traditional Chinese (Taiwan/Hong Kong style)"))
         self.llm_url.insert(0, self.config["LLM_API_URL"])
         self.llm_model.insert(0, self.config["LLM_MODEL"])
+        self.llm_api_key.insert(0, self.config.get("LLM_API_KEY", ""))
         self.merge_duration.insert(0, str(self.config["merge_duration"]))
         self.merge_duration_force.insert(
             0, str(self.config.get("merge_duration_force", 0.2)))
@@ -313,7 +333,45 @@ class SRTGui(ctk.CTk, TkinterDnD.DnDWrapper if HAS_DND else object):
         self.hf_token.insert(0, self.config["HF_TOKEN"])
         self.context_entry.insert(0, self.config.get("context", ""))
         self.update_asr_visibility(self.asr_backend.get())
+        self.update_llm_visibility()
         self.update_prompt_preview()
+
+    def update_llm_visibility(self):
+        skip_translation = self.skip_translation_var.get()
+        llm_widgets = [
+            self.dest_lang_label,
+            self.dest_lang,
+            self.llm_url_label,
+            self.llm_url,
+            self.llm_model_label,
+            self.llm_model,
+            self.llm_api_key_label,
+            self.llm_api_key
+        ]
+
+        if skip_translation:
+            for widget in llm_widgets:
+                widget.grid_remove()
+            self.context_label.grid_remove()
+            self.context_entry.grid_remove()
+            self.prompt_preview_label.grid_remove()
+            self.prompt_preview.grid_remove()
+            self.update_preview_btn.grid_remove()
+            return
+
+        self.dest_lang_label.grid()
+        self.dest_lang.grid()
+        self.llm_url_label.grid()
+        self.llm_url.grid()
+        self.llm_model_label.grid()
+        self.llm_model.grid()
+        self.llm_api_key_label.grid()
+        self.llm_api_key.grid()
+        self.context_label.grid(row=2, column=0, sticky="w", padx=10)
+        self.context_entry.grid(row=3, column=0, padx=10, pady=(0, 10), sticky="ew")
+        self.prompt_preview_label.grid(row=3, column=0, padx=10, pady=5, sticky="nw")
+        self.prompt_preview.grid(row=3, column=1, padx=10, pady=5, sticky="nsew")
+        self.update_preview_btn.grid(row=4, column=1, padx=10, pady=5, sticky="e")
 
     def update_asr_visibility(self, backend):
         # Update source language options based on backend
@@ -383,6 +441,8 @@ class SRTGui(ctk.CTk, TkinterDnD.DnDWrapper if HAS_DND else object):
                 "DEST_LANG": self.dest_lang.get(),
                 "LLM_API_URL": self.llm_url.get(),
                 "LLM_MODEL": self.llm_model.get(),
+                "LLM_API_KEY": self.llm_api_key.get(),
+                "skip_translation": self.skip_translation_var.get(),
                 "merge_duration": float(self.merge_duration.get()),
                 "merge_duration_force": float(self.merge_duration_force.get()),
                 "min_speakers": int(self.min_speakers.get()),
@@ -574,6 +634,7 @@ class SRTGui(ctk.CTk, TkinterDnD.DnDWrapper if HAS_DND else object):
                 "DEST_LANG", "Traditional Chinese (Taiwan/Hong Kong style)")
             srt.LLM_API_URL = self.config["LLM_API_URL"]
             srt.LLM_MODEL = self.config["LLM_MODEL"]
+            srt.LLM_API_KEY = self.config.get("LLM_API_KEY", "")
             srt.MERGE_DURATION = self.config["merge_duration"]
             srt.MERGE_DURATION_FORCE = self.config.get(
                 "merge_duration_force", 0.2)
@@ -675,22 +736,31 @@ class SRTGui(ctk.CTk, TkinterDnD.DnDWrapper if HAS_DND else object):
                 if self.unload_models_var.get():
                     srt.unload_models()
 
-                # 4. Translate
-                self.update_status(f"[{i+1}/{total}] Translating...")
-                self.chunk_stats = {}
-                self.after(0, lambda: self.tps_label.configure(text=""))
-                stage_start_time = time.perf_counter()
-                srt.translate_srt(source_srt, dest_srt, context,
-                                  stats_callback=self.update_tps)
-                stage_times["translate"] = time.perf_counter() - stage_start_time
+                # 4. Translate (optional)
+                if self.config.get("skip_translation", False):
+                    self.update_status(
+                        f"[{i+1}/{total}] Skipping translation (source SRT only)...")
+                    self.after(0, lambda: [
+                        self.tps_label.configure(text=""),
+                        self.sub_progress_bar.set(1.0)
+                    ])
+                    stage_times["translate"] = 0.0
+                else:
+                    self.update_status(f"[{i+1}/{total}] Translating...")
+                    self.chunk_stats = {}
+                    self.after(0, lambda: self.tps_label.configure(text=""))
+                    stage_start_time = time.perf_counter()
+                    srt.translate_srt(source_srt, dest_srt, context,
+                                      stats_callback=self.update_tps)
+                    stage_times["translate"] = time.perf_counter() - stage_start_time
 
-                # Delete original SRT if not requested
-                if not self.config.get("save_origin_srt", True):
-                    try:
-                        if os.path.exists(source_srt):
-                            os.remove(source_srt)
-                    except Exception as e:
-                        print(f"Failed to remove original SRT: {e}")
+                    # Delete original SRT if not requested
+                    if not self.config.get("save_origin_srt", True):
+                        try:
+                            if os.path.exists(source_srt):
+                                os.remove(source_srt)
+                        except Exception as e:
+                            print(f"Failed to remove original SRT: {e}")
 
                 total_video_time = time.perf_counter() - video_start_time
                 print(f"[Timing] {base_name}")
