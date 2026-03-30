@@ -592,12 +592,23 @@ class SRTGui(ctk.CTk, TkinterDnD.DnDWrapper if HAS_DND else object):
                 source_srt = f"{base_path}.{srt.SOURCE_LANG}.srt"
                 dest_srt = f"{base_path}.translated.srt"
 
+                video_start_time = time.perf_counter()
+                stage_times = {
+                    "extract": 0.0,
+                    "diarization_vad": 0.0,
+                    "transcribe": 0.0,
+                    "translate": 0.0
+                }
+
                 # 1. Extract
                 self.update_status(f"[{i+1}/{total}] Extracting audio...")
                 self.after(0, lambda: self.sub_progress_bar.set(0.02))
+                stage_start_time = time.perf_counter()
                 audio_bytes = srt.extract_audio(video_file)
+                stage_times["extract"] = time.perf_counter() - stage_start_time
 
                 # 2. Diarization / VAD
+                stage_start_time = time.perf_counter()
                 timestamps = None
                 if self.config["use_diarization"]:
                     self.update_status(
@@ -643,6 +654,7 @@ class SRTGui(ctk.CTk, TkinterDnD.DnDWrapper if HAS_DND else object):
                             frames, dtype=np.int16).astype(np.float32) / 32768.0
                         wav_tensor = torch.from_numpy(audio_np)
 
+                stage_times["diarization_vad"] = time.perf_counter() - stage_start_time
                 self.after(0, lambda: self.sub_progress_bar.set(0.1))
 
                 # Unload Diarization/VAD models before transcription if requested
@@ -653,9 +665,11 @@ class SRTGui(ctk.CTk, TkinterDnD.DnDWrapper if HAS_DND else object):
                 # 3. Transcribe
                 self.update_status(f"[{i+1}/{total}] Transcribing...")
                 self.after(0, lambda: self.tps_label.configure(text=""))
+                stage_start_time = time.perf_counter()
                 segments = srt.transcribe_fragments(
                     wav_tensor, timestamps, stats_callback=self.update_transcription_progress)
                 srt.save_srt(segments, source_srt)
+                stage_times["transcribe"] = time.perf_counter() - stage_start_time
 
                 # Unload ASR models before translation if requested
                 if self.unload_models_var.get():
@@ -665,8 +679,10 @@ class SRTGui(ctk.CTk, TkinterDnD.DnDWrapper if HAS_DND else object):
                 self.update_status(f"[{i+1}/{total}] Translating...")
                 self.chunk_stats = {}
                 self.after(0, lambda: self.tps_label.configure(text=""))
+                stage_start_time = time.perf_counter()
                 srt.translate_srt(source_srt, dest_srt, context,
                                   stats_callback=self.update_tps)
+                stage_times["translate"] = time.perf_counter() - stage_start_time
 
                 # Delete original SRT if not requested
                 if not self.config.get("save_origin_srt", True):
@@ -675,6 +691,15 @@ class SRTGui(ctk.CTk, TkinterDnD.DnDWrapper if HAS_DND else object):
                             os.remove(source_srt)
                     except Exception as e:
                         print(f"Failed to remove original SRT: {e}")
+
+                total_video_time = time.perf_counter() - video_start_time
+                print(f"[Timing] {base_name}")
+                print(f"  Extract: {stage_times['extract']:.2f}s")
+                print(
+                    f"  Diarization / VAD: {stage_times['diarization_vad']:.2f}s")
+                print(f"  Transcribe: {stage_times['transcribe']:.2f}s")
+                print(f"  Translate: {stage_times['translate']:.2f}s")
+                print(f"  Overall (this video): {total_video_time:.2f}s")
 
                 self.progress_bar.set((i + 1) / total)
 
