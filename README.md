@@ -5,7 +5,7 @@
 > [!IMPORTANT]
 > **Linux Only**: This project is designed for Linux systems and relies on Linux-specific features like `uinput`.
 
-A real-time Speech-to-Text (STT) system specifically optimized for **Cantonese** users, providing high-accuracy transcription for dialects. It supports multiple backends (GLM-ASR, SenseVoice) and local or remote ASR processing, making it ideal for offloading computation to a more powerful machine (like an AMD laptop with a GPU/NPU).
+A real-time Speech-to-Text (STT) system specifically optimized for **Cantonese** users, providing high-accuracy transcription for dialects. It supports multiple backends (GLM-ASR, SenseVoice, Qwen3-ASR) and local or remote ASR processing, making it ideal for offloading computation to a more powerful machine (like an AMD laptop with a GPU/NPU).
 
 This repository contains **two tools**:
 
@@ -43,11 +43,10 @@ This repository contains **two tools**:
     - **GLM-ASR**: Powered by [GLM-ASR-Nano-2512](https://huggingface.co/zai-org/GLM-ASR-Nano-2512), a 1.5B parameter model that outperforms Whisper V3 on multiple benchmarks with exceptional dialect support (Mandarin, Cantonese, English).
     - **SenseVoice**: High-performance ASR using [SenseVoice](https://github.com/k2-fsa/sherpa-onnx) via `sherpa-onnx`. Supports automatic model downloading. **Recommended for CPU-only or weak GPU setups** due to its efficient quantized inference.
     - **Whisper**: Support for OpenAI's [Whisper V3 Large](https://huggingface.co/openai/whisper-large-v3) via Hugging Face Transformers.
-- **Modern GUI**: User-friendly interface built with `CustomTkinter` for easy configuration and monitoring.
+    - **Qwen ASR**: Support for Qwen's [Qwen3-ASR](https://huggingface.co/Qwen/Qwen3-ASR-1.7B) via Hugging Face Transformers or vLLM.
 - **Real-time VAD**: Uses Silero VAD to detect speech and automatically stop recording.
 - **Global Hotkey**: Customizable hotkey (default **F12**) to start recording.
 - **Automatic Typing**: Transcribed text is automatically typed into your active window using `uinput`.
-- **System Prompts**: Highly customizable via system prompts, allowing users to guide the ASR model's output for specific domains or styles.
 - **Traditional Chinese Support**: Built-in Simplified to Traditional Chinese conversion (OpenCC).
 - **Multi-language UI**: Supports English and Traditional Chinese (auto-detected or configurable).
 - **Distributed Architecture**: Run the ASR model on a separate machine to save resources on your main workstation.
@@ -76,14 +75,12 @@ This repository contains **two tools**:
 
    **AMD (ROCm)**:
    ```bash
-   uv pip install torch==2.9.1 torchvision==0.24.1 torchaudio==2.9.1 --index-url https://download.pytorch.org/whl/rocm6.4
-   uv pip install rocrand
+   uv pip install --index-url https://download.pytorch.org/whl/rocm7.2
    uv pip install -r requirements.txt
    ```
 
    *ROCm notes:*
-   - `rocrand` is required for diarization.
-   - Keep `torchaudio` at `<=2.9.0` for compatibility.
+   - Operating System's `rocrand` is required for diarization.
    - For some AMD GPUs (like RX 680M), you may need:
    ```bash
    export HSA_OVERRIDE_GFX_VERSION=10.3.0
