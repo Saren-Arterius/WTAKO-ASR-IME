@@ -165,6 +165,58 @@ uv run srt-generate-translate/gui.py
 uv run srt-generate-translate/srt.py --help
 ```
 
+## SRT Performance Metrics (Offline, Local Compute)
+
+Test case: an approximately **11-minute anime episode** (Episode 172, `第172話 黒龍王・ブラックトラゴン.mp4`) with **dense, near-continuous dialogue**.
+
+On an **AMD 6800U laptop with 32 GB RAM**, the SRT pipeline can generate Traditional Chinese subtitles for a ~10–11 minute Japanese anime in about **2 minutes** using VAD-only mode, fully offline.
+
+### Baseline (AMD 6800U, 32 GB RAM)
+
+- **No internet required** for the full pipeline (all local compute).
+- **VAD only**:
+  - Extract: `0.73s`
+  - Diarization / VAD: `7.38s`
+  - Transcribe: `12.61s`
+  - Translate: `96.13s`
+  - **Overall: `117.76s`**
+- **With speaker diarization model enabled**:
+  - Extract: `0.63s`
+  - Diarization / VAD: `97.70s`
+  - Transcribe: `13.25s`
+  - Translate: `75.08s`
+  - **Overall: `188.13s`**
+
+### Accuracy/Quality Upgrade Options
+
+For better subtitle quality, you can enable more advanced components:
+
+- **Speaker diarization model (pyannote)**  
+  Better speaker separation.  
+  Reference speed for a 24-minute video:
+  - RTX 4090: around **10+ seconds**
+  - AMD iGPU laptop: around **3 minutes**
+
+- **Qwen ASR for transcription**  
+  Better transcription accuracy.  
+  Reference speed for ~200 audio segments:
+  - RTX 4090: around **0.1–0.2s/segment**
+  - AMD iGPU laptop: around **10s/segment**
+
+- **Stronger LLM translation**
+  - Faster option: **Qwen3.5 35B-A3B** (AMD iGPU laptop can finish translation in **under ~90s**)
+  - More accurate option: **27B** (RTX 4090 around **~30s**)
+  - If RAM is below 32 GB, or you need faster and more accurate output, use a cloud model endpoint.
+
+Example `llama-server` launch for local Qwen3.5-35B-A3B:
+```bash
+./build/bin/llama-server -m models/Qwen3.5-35B-A3B-UD-Q4_K_XL.gguf --no-mmap -ctk q8_0 -ctv q8_0 -c 32768 --temp 0.7 \
+--top-p 0.8 \
+--top-k 20 \
+--min-p 0.00 \
+--chat-template-kwargs "{\"enable_thinking\": false}"
+```
+
 ## Configuration
 
 `client/config.json` and `srt-generate-translate/srt_config.json` are different and unrelated:
