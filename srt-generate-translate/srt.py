@@ -116,12 +116,35 @@ def get_vad_timestamps(audio_bytes):
         repo_or_dir='snakers4/silero-vad', model='silero_vad')
     (get_speech_timestamps, _, read_audio, _, _) = utils
 
-    # Convert bytes to tensor
-    audio_stream = io.BytesIO(audio_bytes)
-    wav = read_audio(audio_stream, sampling_rate=16000)
+    temp_wav = "temp_vad_full.wav"
+    with open(temp_wav, "wb") as f:
+        f.write(audio_bytes)
+
+    try:
+        # Try normal file-path decode first (torchaudio/default path)
+        wav = read_audio(temp_wav, sampling_rate=16000)
+    except Exception as e:
+        print(
+            f"Warning: File-based VAD audio loading failed ({e}). Retrying with in-memory audio input fallback.")
+        audio_input = wav_bytes_to_input_dict(audio_bytes)
+        waveform = audio_input["waveform"]
+        wav = waveform[0] if waveform.ndim > 1 else waveform
+    finally:
+        if os.path.exists(temp_wav):
+            os.remove(temp_wav)
 
     speech_timestamps = get_speech_timestamps(wav, model, sampling_rate=16000)
     return speech_timestamps, wav
+
+
+def wav_bytes_to_input_dict(audio_bytes):
+    audio_stream = io.BytesIO(audio_bytes)
+    with wave.open(audio_stream, 'rb') as wav_file:
+        sample_rate = wav_file.getframerate()
+        frames = wav_file.readframes(wav_file.getnframes())
+        audio_np = np.frombuffer(frames, dtype=np.int16).astype(np.float32) / 32768.0
+        waveform = torch.from_numpy(audio_np).unsqueeze(0)  # (channel, time)
+    return {"waveform": waveform, "sample_rate": sample_rate}
 
 
 def merge_short_segments(segments, min_duration=None, force_duration=None):
@@ -210,7 +233,14 @@ def run_diarization_community(audio_bytes, min_speakers=None, stats_callback=Non
         if min_speakers is not None and min_speakers > 0:
             pipeline_kwargs["min_speakers"] = min_speakers
 
-        output = pipeline(temp_wav, hook=hook, **pipeline_kwargs)
+        try:
+            # Try normal file-path decode first (torchcodec/default path)
+            output = pipeline(temp_wav, hook=hook, **pipeline_kwargs)
+        except Exception as e:
+            print(
+                f"Warning: File-based diarization failed ({e}). Retrying with in-memory audio input fallback.")
+            audio_input = wav_bytes_to_input_dict(audio_bytes)
+            output = pipeline(audio_input, hook=hook, **pipeline_kwargs)
     os.remove(temp_wav)
 
     # Handle overlapping diarization results: prefer the result that has a later "start"
