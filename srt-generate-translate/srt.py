@@ -541,75 +541,141 @@ def get_translation_prompt(source_lang, dest_lang, lines, context=""):
     input_data = {str(i+1): line for i, line in enumerate(lines)}
     formatted_json = json.dumps(input_data, ensure_ascii=False, indent=2)
 
-    prompt = f"""You are an expert translator specializing in {source_name} to {dest_lang} localization.
+    prompt = f"""You are a specialized translation engine that ONLY outputs valid JSON.
 
 CRITICAL INSTRUCTIONS:
-1. TRANSLATE ALL {source_name} text into natural, idiomatic {dest_lang}. 
-2. DO NOT leave any {source_name} sentences or phrases untranslated in the output.
-3. Output the translations in a JSON object where the keys are the original indices.
-4. If you feel multiple consecutive lines should be combined into one subtitle for better flow, use a range key like "1-2".
-   Example:
-   Input:
-   {{
-     "1": "Hello.",
-     "2": "How are you?"
-   }}
-   Output:
-   {{
-     "1-2": "你好。最近怎麼樣？"
-   }}
-5. Use {dest_lang} characters and style.
-{f'6. Additional Context/Instructions: {context}' if context else ''}
+1. TRANSLATE ALL {source_name} text into natural, idiomatic {dest_lang}.
+2. DO NOT leave any {source_name} sentences or phrases untranslated.
+3. Output MUST be a SINGLE JSON object.
+4. Keys MUST be the original indices (e.g., "1", "2") or ranges (e.g., "1-2") if combining lines.
+5. Values MUST be the translated string.
+6. DO NOT include any markdown formatting, code blocks (```json), or conversational notes.
+7. DO NOT include any text before or after the JSON object.
+8. Ensure every key-value pair is separated by a comma and every string is properly escaped.
+9. Use {dest_lang} characters and style.
+{f'10. Additional Context: {context}' if context else ''}
 
 Input {source_name} JSON:
 {formatted_json}
 
-Output {dest_lang} JSON:"""
+Output {dest_lang} JSON (START WITH '{{' AND END WITH '}}'):"""
     return prompt
 
 
 def translate_chunk(client, lines, converter, context="", stats_callback=None, chunk_id=0):
-    prompt = get_translation_prompt(
-        SOURCE_LANG, DEST_LANG, lines, context)
-    try:
-        response = client.chat.completions.create(
-            model=LLM_MODEL,
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.1,
-            extra_body={"repetition_penalty": 1.1},
-            stream=True
-        )
+    all_translated_data = {}
+    remaining_lines = list(lines)
+    # Track the starting index for the current sub-chunk relative to the original 'lines'
+    base_idx = 0
 
-        full_content = ""
-        start_time = None
-        token_count = 0
+    while remaining_lines:
+        prompt = get_translation_prompt(
+            SOURCE_LANG, DEST_LANG, remaining_lines, context)
+        # Adjust indices in prompt to match original numbering if needed,
+        # but get_translation_prompt currently uses 1..N of whatever it's given.
+        # To keep it simple, we'll let get_translation_prompt use 1..N and we map them back.
 
-        for chunk in response:
-            if chunk.choices[0].delta.content:
-                if start_time is None:
-                    start_time = time.time()
-                content = chunk.choices[0].delta.content
-                full_content += content
-                token_count += 1
-                if stats_callback:
-                    stats_callback(chunk_id, token_count,
-                                   time.time() - start_time, full_content)
+        try:
+            response = client.chat.completions.create(
+                model=LLM_MODEL,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0,
+                extra_body={"repetition_penalty": 1},
+                stream=True
+            )
 
-        # Extract JSON from response
-        import re
-        json_match = re.search(r'\{.*\}', full_content, re.DOTALL)
-        if json_match:
-            translated_data = json.loads(json_match.group(0))
-            # Convert back to a format translate_srt expects (one line per original line)
-            # but we'll actually change translate_srt to handle this dict.
-            return converter.convert(json.dumps(translated_data, ensure_ascii=False))
-        else:
-            print(f"Warning: No JSON found in chunk {chunk_id} response")
-            return converter.convert(full_content)
+            full_content = ""
+            start_time = None
+            token_count = 0
+            interrupted = False
 
-    except Exception as e:
-        print(f"Chunk translation error: {e}")
-        return ""
+            for chunk in response:
+                if chunk.choices[0].delta.content:
+                    if start_time is None:
+                        start_time = time.time()
+                    content = chunk.choices[0].delta.content
+                    full_content += content
+                    token_count += 1
+
+                    # Check for infinite loop / glitch: line too long
+                    # Also check if the model is outputting a single massive line without newlines
+                    current_line = full_content.split('\n')[-1]
+                    if len(current_line) > 200:
+                        print(
+                            f"\n[Chunk {chunk_id}] Line length exceeded 200 chars (glitch detected). Interrupting...")
+                        print(
+                            f"[Glitch Line]: {current_line[:200]}... (total {len(current_line)} chars)")
+                        interrupted = True
+                        break
+
+                    if stats_callback:
+                        # For stats, we show progress of what we have so far
+                        stats_callback(chunk_id, token_count,
+                                       time.time() - start_time, full_content)
+
+            if interrupted:
+                # Try to close the JSON if it looks like it was in the middle of one
+                if "{" in full_content and "}" not in full_content:
+                    full_content += '\n  "glitch": "terminated"\n}'
+                elif "{" in full_content and full_content.strip().endswith(','):
+                    full_content = full_content.strip()[:-1] + '\n}'
+
+            # Extract JSON from response
+            import re
+            json_match = re.search(r'\{.*\}', full_content, re.DOTALL)
+            if json_match:
+                try:
+                    # Clean up potential trailing commas before parsing if interrupted
+                    json_str = json_match.group(0)
+                    if interrupted:
+                        json_str = re.sub(r',\s*\}', '}', json_str)
+
+                    # Remove control characters that cause JSON parsing errors
+                    json_str = re.sub(r'[\x00-\x1F\x7F]', '', json_str)
+
+                    chunk_data = json.loads(json_str)
+
+                    max_processed_idx = 0
+                    for key, val in chunk_data.items():
+                        if key == "glitch":
+                            continue
+                        # Map relative keys (1, 2, 1-2) to absolute keys based on base_idx
+                        match = re.match(r'^(\d+)(?:-(\d+))?$', str(key))
+                        if match:
+                            s = int(match.group(1))
+                            e = int(match.group(2)) if match.group(2) else s
+
+                            new_key = f"{s + base_idx}" if s == e else f"{s + base_idx}-{e + base_idx}"
+                            all_translated_data[new_key] = val
+                            max_processed_idx = max(max_processed_idx, e)
+
+                    if max_processed_idx > 0:
+                        remaining_lines = remaining_lines[max_processed_idx:]
+                        base_idx += max_processed_idx
+                    else:
+                        # If no valid indices found but we got JSON, skip one to avoid loop
+                        remaining_lines = remaining_lines[1:]
+                        base_idx += 1
+                except Exception as e:
+                    print(f"Error parsing partial JSON: {e}")
+                    remaining_lines = remaining_lines[1:]
+                    base_idx += 1
+            else:
+                print(f"Warning: No JSON found in chunk {chunk_id} response")
+                remaining_lines = remaining_lines[1:]
+                base_idx += 1
+
+            if not interrupted and not remaining_lines:
+                break
+
+        except Exception as e:
+            print(f"Chunk translation error: {e}")
+            # Fallback: add remaining lines as is
+            for i, line in enumerate(remaining_lines):
+                all_translated_data[str(base_idx + i + 1)] = line
+            break
+
+    return converter.convert(json.dumps(all_translated_data, ensure_ascii=False))
 
 
 def parse_srt(content):
