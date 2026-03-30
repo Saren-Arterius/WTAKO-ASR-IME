@@ -20,6 +20,7 @@ ASR_API_URL = "http://100.64.0.8:8003/v1"
 ASR_MODEL = "Qwen/Qwen3-ASR-1.7B"
 LLM_API_URL = "http://100.64.0.8:8000/v1"
 LLM_MODEL = "Intel/Qwen3-Coder-Next-int4-AutoRound"
+LLM_API_KEY = ""
 ASR_BACKEND = "openai"  # "openai", "sensevoice", or "qwen_asr"
 SOURCE_LANG = "ja"
 DEST_LANG = "Traditional Chinese (Taiwan/Hong Kong style)"
@@ -641,7 +642,8 @@ def translate_srt(input_path, output_path, context="", stats_callback=None):
     for i in range(0, total_blocks, chunk_size):
         chunks_data.append(parsed_blocks[i:i + chunk_size])
 
-    client = OpenAI(base_url=LLM_API_URL, api_key="EMPTY")
+    llm_api_key = LLM_API_KEY if LLM_API_KEY else "EMPTY"
+    client = OpenAI(base_url=LLM_API_URL, api_key=llm_api_key)
     converter = opencc.OpenCC('s2t')
 
     # Wrapper for stats_callback to include total_blocks
@@ -689,7 +691,7 @@ def translate_srt(input_path, output_path, context="", stats_callback=None):
 
 def main():
     # Update global variables
-    global ASR_API_URL, ASR_MODEL, LLM_API_URL, LLM_MODEL, ASR_BACKEND, SOURCE_LANG, DEST_LANG
+    global ASR_API_URL, ASR_MODEL, LLM_API_URL, LLM_MODEL, LLM_API_KEY, ASR_BACKEND, SOURCE_LANG, DEST_LANG
     global MERGE_DURATION, MERGE_DURATION_FORCE, HF_TOKEN, USE_DIARIZATION, MIN_SPEAKERS
     global UNLOAD_MODELS_AFTER_USE, SAVE_DEBUG_SRT, SAVE_ORIGIN_SRT
 
@@ -713,6 +715,8 @@ def main():
                         default=LLM_API_URL, help="LLM API URL")
     parser.add_argument("--llm-model", type=str,
                         default=LLM_MODEL, help="LLM Model name")
+    parser.add_argument("--llm-api-key", type=str,
+                        default=LLM_API_KEY, help="LLM API key for translation endpoint")
     parser.add_argument("--merge-duration", type=float,
                         default=MERGE_DURATION, help="Merge duration (s)")
     parser.add_argument("--merge-duration-force", type=float,
@@ -740,6 +744,7 @@ def main():
     ASR_MODEL = args.asr_model
     LLM_API_URL = args.llm_url
     LLM_MODEL = args.llm_model
+    LLM_API_KEY = args.llm_api_key
     ASR_BACKEND = args.asr_backend
     SOURCE_LANG = args.source_lang
     DEST_LANG = args.dest_lang
