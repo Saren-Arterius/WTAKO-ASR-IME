@@ -165,16 +165,6 @@ uv run srt-generate-translate/gui.py
 uv run srt-generate-translate/srt.py --help
 ```
 
-> [!TIP]
-> **Font Issues with `uv`**: If you find that the GUI only displays a "fixed" font and cannot show CJK characters correctly, it's likely because `uv`'s portable Python binaries are not integrated with your system's font configuration.
->
-> To fix this, recreate your virtual environment using the system's Python:
-> ```bash
-> rm -rf .venv
-> uv venv --python $(which python3)
-> uv pip install -r requirements.txt
-> ```
-
 ## Configuration
 
 `client/config.json` and `srt-generate-translate/srt_config.json` are different and unrelated:
@@ -224,3 +214,14 @@ If the application picks the wrong microphone:
 
 ### 4. Muting Not Working
 The auto-mute feature uses `pactl`. Ensure `pulseaudio-utils` or `pipewire-pulse` is installed and `pactl set-sink-mute @DEFAULT_SINK@ 1` works manually.
+
+### 5. Font Issues with `uv`
+If you find that the GUI only displays a "fixed" font and cannot show CJK characters correctly, it's likely because `uv`'s portable Python binaries are not integrated with your system's font configuration.
+
+To fix this, recreate your virtual environment using the system's Python:
+```bash
+rm -rf .venv
+uv venv --python $(which python3)
+# Install torch, and then
+uv pip install -r requirements.txt
+```
