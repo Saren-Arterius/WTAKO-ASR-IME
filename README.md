@@ -163,6 +163,29 @@ uv run srt-generate-translate/gui.py
 uv run srt-generate-translate/srt.py --help
 ```
 
+### LLM Translation Endpoint Setup (Required)
+
+The SRT translator calls an OpenAI-compatible LLM endpoint. You need to set this up yourself before running translation. Supported deployment choices:
+
+1. **Self-host with `llama.cpp` (`llama-server`)**
+2. **Self-host with `vLLM`**
+3. **Use a cloud API** (any OpenAI-compatible provider endpoint)
+
+Set these fields in `srt-generate-translate/srt_config.json` or in the GUI:
+
+- `LLM_API_URL` (e.g. `http://127.0.0.1:8000/v1` or provider base URL)
+- `LLM_MODEL`
+- `LLM_API_KEY` (optional for local servers, usually required for cloud APIs)
+
+CLI equivalents:
+```bash
+uv run srt-generate-translate/srt.py \
+  /path/to/video.mp4 \
+  --llm-url http://127.0.0.1:8000/v1 \
+  --llm-model your-model-name \
+  --llm-api-key your_api_key_if_needed
+```
+
 ## SRT Performance Metrics (Offline, Local Compute)
 
 Test case: an approximately **11-minute anime episode** (Episode 172, `第172話 黒龍王・ブラックトラゴン.mp4`) with **dense, near-continuous dialogue**.
@@ -223,7 +246,7 @@ Example `llama-server` launch for local Qwen3.5-35B-A3B:
   Controls realtime input behavior for the IME client (e.g., `audio_devices`, `hotkey`, typing/system prompt behavior, UI language, sound settings).
 
 - **`srt-generate-translate/srt_config.json` (SRT tool only)**  
-  Controls subtitle pipeline settings (e.g., `ASR_API_URL`, `ASR_MODEL`, `ASR_BACKEND`, `SOURCE_LANG`, `DEST_LANG`, `LLM_API_URL`, `LLM_MODEL`, merge/diarization options, `video_files`, translation `context`, and SRT save/debug flags).
+  Controls subtitle pipeline settings (e.g., `ASR_API_URL`, `ASR_MODEL`, `ASR_BACKEND`, `SOURCE_LANG`, `DEST_LANG`, `LLM_API_URL`, `LLM_MODEL`, `LLM_API_KEY`, merge/diarization options, `video_files`, translation `context`, and SRT save/debug flags).
 
 Changes in one config file do **not** affect the other tool.
 
