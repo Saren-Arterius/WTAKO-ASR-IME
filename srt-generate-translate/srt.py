@@ -11,10 +11,12 @@ import wave
 import io
 import base64
 import argparse
+import re
 from openai import OpenAI
 from concurrent.futures import ThreadPoolExecutor
 from pyannote.audio import Pipeline
 
+ENABLE_TRANSCRIBE_CONTEXT = False
 # Configuration Defaults
 ASR_API_URL = "http://100.64.0.8:8003/v1"
 ASR_MODEL = "Qwen/Qwen3-ASR-1.7B"
@@ -316,7 +318,30 @@ def format_timestamp(seconds):
     return f"{hours:02d}:{minutes:02d}:{secs:02d},{ms:03d}"
 
 
-def transcribe_one(client, i, ts, wav_tensor, total):
+def clean_transcribed_text(i, text):
+    if len(text) > 10 and re.search(r'(.)\1{9,}', text):
+        print(
+            f"Warning: Segment {i+1} contains repeating characters. Cropping to 10 chars.")
+        return text[:10]
+
+    if len(text) > 200:
+        print(
+            f"Warning: Segment {i+1} text too long ({len(text)} chars). Cropping to 200 chars.")
+        return text[:200]
+
+    return text
+
+
+def build_transcription_result(i, ts, text):
+    return {
+        'index': i,
+        'start': ts['start'] / 16000,
+        'end': ts['end'] / 16000,
+        'text': text
+    }
+
+
+def transcribe_one(client, i, ts, wav_tensor, total, context=""):
     start_sample = ts['start']
     end_sample = ts['end']
     # Add some padding
@@ -332,25 +357,9 @@ def transcribe_one(client, i, ts, wav_tensor, total):
         recognizer.decode_stream(stream)
         text = stream.result.text
         # SenseVoice might include language tags like <|zh|>, remove them if present
-        import re
         text = re.sub(r'<\|.*?\|>', '', text).strip()
-
-        # Check for repeating characters (e.g., "aaaaaaaaaa..." or "うおおおお...")
-        import re
-        if len(text) > 10 and re.search(r'(.)\1{9,}', text):
-            print(
-                f"Warning: Segment {i+1} contains repeating characters. Cropping to 10 chars.")
-            text = text[:10]
-        elif len(text) > 100:
-            print(
-                f"Warning: Segment {i+1} text too long ({len(text)} chars). Cropping to 100 chars.")
-            text = text[:100]
-        return {
-            'index': i,
-            'start': ts['start'] / 16000,
-            'end': ts['end'] / 16000,
-            'text': text
-        }
+        text = clean_transcribed_text(i, text)
+        return build_transcription_result(i, ts, text)
 
     if ASR_BACKEND == "qwen_asr":
         model = get_qwen_asr_model()
@@ -373,23 +382,8 @@ def transcribe_one(client, i, ts, wav_tensor, total):
             language=language,
         )
         text = results[0].text.strip()
-
-        # Check for repeating characters (e.g., "aaaaaaaaaa..." or "うおおおお...")
-        import re
-        if len(text) > 10 and re.search(r'(.)\1{9,}', text):
-            print(
-                f"Warning: Segment {i+1} contains repeating characters. Cropping to 10 chars.")
-            text = text[:10]
-        elif len(text) > 100:
-            print(
-                f"Warning: Segment {i+1} text too long ({len(text)} chars). Cropping to 100 chars.")
-            text = text[:100]
-        return {
-            'index': i,
-            'start': ts['start'] / 16000,
-            'end': ts['end'] / 16000,
-            'text': text
-        }
+        text = clean_transcribed_text(i, text)
+        return build_transcription_result(i, ts, text)
 
     # Convert to WAV bytes
     output = io.BytesIO()
@@ -400,18 +394,34 @@ def transcribe_one(client, i, ts, wav_tensor, total):
         wav_file.writeframes((fragment * 32767).astype(np.int16).tobytes())
     audio_b64 = base64.b64encode(output.getvalue()).decode("utf-8")
 
-    print(f"Transcribing fragment {i+1}/{total} ({ts['start']/16000:.2f}s)...")
     try:
+        messages = []
+        context_text = context.strip()
+        
+        if ENABLE_TRANSCRIBE_CONTEXT and context_text:
+            print(f"Transcribing fragment w/ctx {i+1}/{total} ({ts['start']/16000:.2f}s)...")
+            messages.append({
+                "role": "system",
+                "content": (
+                    "Use this context to improve transcription accuracy for names, tone, and domain terms: "
+                    f"{context_text}"
+                )
+            })
+        else:
+            print(f"Transcribing fragment {i+1}/{total} ({ts['start']/16000:.2f}s)...")
+
+        messages.append({
+            "role": "user",
+            "content": [
+                {"type": "input_audio", "input_audio": {
+                    "data": audio_b64, "format": "wav"}}
+            ]
+        })
+
         # Use streaming to enforce a total timeout including response generation time
         response = client.chat.completions.create(
             model=ASR_MODEL,
-            messages=[{
-                "role": "user",
-                "content": [
-                    {"type": "input_audio", "input_audio": {
-                        "data": audio_b64, "format": "wav"}}
-                ]
-            }],
+            messages=messages,
             extra_body={
                 "chat_template_kwargs": {"language": SOURCE_LANG},
                 "repetition_penalty": 1.5
@@ -431,36 +441,15 @@ def transcribe_one(client, i, ts, wav_tensor, total):
                 text += chunk.choices[0].delta.content
         if '<asr_text>' in text:
             text = text.split('<asr_text>')[1].strip()
-        text = text.strip()
-
-        # Check for repeating characters (e.g., "aaaaaaaaaa..." or "うおおおお...")
-        import re
-        if len(text) > 10 and re.search(r'(.)\1{9,}', text):
-            print(
-                f"Warning: Segment {i+1} contains repeating characters. Cropping to 10 chars.")
-            text = text[:10]
-        elif len(text) > 100:
-            print(
-                f"Warning: Segment {i+1} text too long ({len(text)} chars). Cropping to 100 chars.")
-            text = text[:100]
-        return {
-            'index': i,
-            'start': ts['start'] / 16000,
-            'end': ts['end'] / 16000,
-            'text': text
-        }
+        text = clean_transcribed_text(i, text.strip())
+        return build_transcription_result(i, ts, text)
     except Exception as e:
         print(f"Error transcribing fragment {i}: {e}")
         # If timeout or other error, return empty string as requested
-        return {
-            'index': i,
-            'start': ts['start'] / 16000,
-            'end': ts['end'] / 16000,
-            'text': ""
-        }
+        return build_transcription_result(i, ts, "")
 
 
-def transcribe_fragments(wav_tensor, timestamps, stats_callback=None):
+def transcribe_fragments(wav_tensor, timestamps, context="", stats_callback=None):
     # Cap each segment to be 15 seconds max.
     # If a segment is longer than 15 seconds, it's likely glitched; crop it to 15s.
     MAX_SEGMENT_DURATION_S = 15.0
@@ -493,7 +482,7 @@ def transcribe_fragments(wav_tensor, timestamps, stats_callback=None):
         for i, ts in enumerate(timestamps):
             print(
                 f"Transcribing fragment {i+1}/{total} ({ts['start']/16000:.2f}s) with {ASR_BACKEND}...")
-            res = transcribe_one(None, i, ts, wav_tensor, total)
+            res = transcribe_one(None, i, ts, wav_tensor, total, context=context)
             if res:
                 results.append(res)
             update_progress()
@@ -502,7 +491,7 @@ def transcribe_fragments(wav_tensor, timestamps, stats_callback=None):
     client = OpenAI(base_url=ASR_API_URL, api_key="EMPTY")
     with ThreadPoolExecutor(max_workers=8) as executor:
         def wrapped_transcribe(i, ts):
-            res = transcribe_one(client, i, ts, wav_tensor, total)
+            res = transcribe_one(client, i, ts, wav_tensor, total, context=context)
             update_progress()
             return res
 
@@ -546,20 +535,50 @@ def get_translation_prompt(source_lang, dest_lang, lines, context=""):
 CRITICAL INSTRUCTIONS:
 1. TRANSLATE ALL {source_name} text into natural, idiomatic {dest_lang}.
 2. DO NOT leave any {source_name} sentences or phrases untranslated.
-3. Output MUST be a SINGLE JSON object.
-4. Keys MUST be the original indices (e.g., "1", "2") or ranges (e.g., "1-2") if combining lines.
-5. Values MUST be the translated string.
-6. DO NOT include any markdown formatting, code blocks (```json), or conversational notes.
-7. DO NOT include any text before or after the JSON object.
-8. Ensure every key-value pair is separated by a comma and every string is properly escaped.
-9. Use {dest_lang} characters and style.
-{f'10. Additional Context: {context}' if context else ''}
+3. Input come from raw ASR output and can contain invalid text, garbled fragments, or content that does not make sense. Infer the most likely intended meaning when possible; if a part is truly nonsensical, produce the best natural {dest_lang} rendering of what is present without inventing unrelated content.
+4. Output MUST be a SINGLE JSON object.
+5. Keys MUST be the original indices (e.g., "1", "2") or ranges (e.g., "1-2") if combining lines.
+6. Values MUST be the translated string.
+7. DO NOT include any markdown formatting, code blocks (```json), or conversational notes.
+8. DO NOT include any text before or after the JSON object.
+9. Ensure every key-value pair is separated by a comma and every string is properly escaped.
+10. Use {dest_lang} characters and style.
+{f'11. Additional Context: {context}' if context else ''}
 
 Input {source_name} JSON:
 {formatted_json}
 
 Output {dest_lang} JSON (START WITH '{{' AND END WITH '}}'):"""
     return prompt
+
+
+def extract_partial_translation_entries(raw_content):
+    import re
+
+    json_start = raw_content.find("{")
+    if json_start == -1:
+        return {}
+
+    candidate = raw_content[json_start:]
+
+    # Extract only fully completed JSON string key/value pairs:
+    # "12": "translated text"
+    pair_pattern = re.compile(
+        r'"(?P<key>\d+(?:-\d+)?)"\s*:\s*"(?P<val>(?:\\.|[^"\\])*)"'
+    )
+
+    extracted = {}
+    for match in pair_pattern.finditer(candidate):
+        key = match.group("key")
+        raw_val = match.group("val")
+        try:
+            # Decode escaped JSON string content safely
+            value = json.loads(f'"{raw_val}"')
+        except Exception:
+            value = raw_val
+        extracted[key] = value
+
+    return extracted
 
 
 def translate_chunk(client, lines, converter, context="", stats_callback=None, chunk_id=0):
@@ -614,54 +633,57 @@ def translate_chunk(client, lines, converter, context="", stats_callback=None, c
                                        time.time() - start_time, full_content)
 
             if interrupted:
-                # Try to close the JSON if it looks like it was in the middle of one
-                if "{" in full_content and "}" not in full_content:
-                    full_content += '\n  "glitch": "terminated"\n}'
-                elif "{" in full_content and full_content.strip().endswith(','):
-                    full_content = full_content.strip()[:-1] + '\n}'
+                # Keep as-is and recover completed key/value pairs from partial output.
+                # Appending synthetic JSON here can corrupt unfinished strings.
+                pass
 
             # Extract JSON from response
             import re
             json_match = re.search(r'\{.*\}', full_content, re.DOTALL)
+            chunk_data = None
+
             if json_match:
                 try:
-                    # Clean up potential trailing commas before parsing if interrupted
                     json_str = json_match.group(0)
-                    if interrupted:
-                        json_str = re.sub(r',\s*\}', '}', json_str)
-
                     # Remove control characters that cause JSON parsing errors
                     json_str = re.sub(r'[\x00-\x1F\x7F]', '', json_str)
-
                     chunk_data = json.loads(json_str)
-
-                    max_processed_idx = 0
-                    for key, val in chunk_data.items():
-                        if key == "glitch":
-                            continue
-                        # Map relative keys (1, 2, 1-2) to absolute keys based on base_idx
-                        match = re.match(r'^(\d+)(?:-(\d+))?$', str(key))
-                        if match:
-                            s = int(match.group(1))
-                            e = int(match.group(2)) if match.group(2) else s
-
-                            new_key = f"{s + base_idx}" if s == e else f"{s + base_idx}-{e + base_idx}"
-                            all_translated_data[new_key] = val
-                            max_processed_idx = max(max_processed_idx, e)
-
-                    if max_processed_idx > 0:
-                        remaining_lines = remaining_lines[max_processed_idx:]
-                        base_idx += max_processed_idx
-                    else:
-                        # If no valid indices found but we got JSON, skip one to avoid loop
-                        remaining_lines = remaining_lines[1:]
-                        base_idx += 1
                 except Exception as e:
                     print(f"Error parsing partial JSON: {e}")
+
+            # If normal JSON parse fails (common when interrupted), recover completed pairs
+            if chunk_data is None:
+                recovered = extract_partial_translation_entries(full_content)
+                if recovered:
+                    chunk_data = recovered
+                    if interrupted:
+                        print(
+                            f"[Chunk {chunk_id}] Recovered {len(recovered)} completed translation entries from interrupted output.")
+                else:
+                    print(f"Warning: No recoverable JSON entries found in chunk {chunk_id}")
                     remaining_lines = remaining_lines[1:]
                     base_idx += 1
+                    continue
+
+            max_processed_idx = 0
+            for key, val in chunk_data.items():
+                # Map relative keys (1, 2, 1-2) to absolute keys based on base_idx
+                match = re.match(r'^(\d+)(?:-(\d+))?$', str(key))
+                if not match:
+                    continue
+
+                s = int(match.group(1))
+                e = int(match.group(2)) if match.group(2) else s
+
+                new_key = f"{s + base_idx}" if s == e else f"{s + base_idx}-{e + base_idx}"
+                all_translated_data[new_key] = val
+                max_processed_idx = max(max_processed_idx, e)
+
+            if max_processed_idx > 0:
+                remaining_lines = remaining_lines[max_processed_idx:]
+                base_idx += max_processed_idx
             else:
-                print(f"Warning: No JSON found in chunk {chunk_id} response")
+                # If no valid indices found, skip one to avoid loop
                 remaining_lines = remaining_lines[1:]
                 base_idx += 1
 
@@ -937,7 +959,7 @@ def main():
             unload_models()
 
         # 3. Transcribe
-        segments = transcribe_fragments(wav_tensor, timestamps)
+        segments = transcribe_fragments(wav_tensor, timestamps, context=context)
 
         source_srt = f"{base_path}.{SOURCE_LANG}.srt"
         dest_srt = f"{base_path}.translated.srt"
