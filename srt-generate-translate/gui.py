@@ -747,7 +747,7 @@ class SRTGui(ctk.CTk, TkinterDnD.DnDWrapper if HAS_DND else object):
                 self.after(0, lambda: self.tps_label.configure(text=""))
                 stage_start_time = time.perf_counter()
                 segments = srt.transcribe_fragments(
-                    wav_tensor, timestamps, stats_callback=self.update_transcription_progress)
+                    wav_tensor, timestamps, context=context, stats_callback=self.update_transcription_progress)
                 srt.save_srt(segments, source_srt)
                 stage_times["transcribe"] = time.perf_counter() - \
                     stage_start_time
