@@ -538,7 +538,18 @@ def get_translation_prompt(source_lang, dest_lang, lines, context=""):
     source_name = lang_map.get(source_lang, source_lang)
 
     # Format lines as a JSON object for the LLM
-    input_data = {str(i+1): line for i, line in enumerate(lines)}
+    # Each line includes duration as an inline comment for LLM reference
+    input_data = {}
+    for i, line in enumerate(lines):
+        if isinstance(line, dict):
+            # Line with duration info: include duration as inline comment
+            text = line["text"]
+            duration = line["duration"]
+            # Format: "text" // duration: X.Xs
+            input_data[str(i+1)] = f"{text} // {duration}s"
+        else:
+            # Plain text line (fallback)
+            input_data[str(i+1)] = line
     formatted_json = json.dumps(input_data, ensure_ascii=False, indent=2)
 
     prompt = f"""You are a specialized translation engine that ONLY outputs valid JSON.
@@ -548,18 +559,29 @@ CRITICAL INSTRUCTIONS:
 2. DO NOT leave any {source_name} sentences or phrases untranslated.
 3. Output MUST be a SINGLE JSON object.
 4. Keys MUST be the original indices (e.g., "1", "2") or ranges (e.g., "1-2") if combining lines.
-5. Values MUST be the translated string.
+5. Values MUST be the translated string (do NOT include duration comments in output).
 6. DO NOT include any markdown formatting, code blocks (```json), or conversational notes.
 7. DO NOT include any text before or after the JSON object.
 8. Ensure every key-value pair is separated by a comma and every string is properly escaped.
 9. Use {dest_lang} characters and style.
-{f'10. Additional Context: {context}' if context else ''}
+10. Each input line includes a duration comment (e.g., "text  // 0.3s"). Use this to identify:
+    - Very short segments (e.g., < 0.3s) which may be ASR errors or noise
+    - Segments with unusually short duration that might need to be merged with neighbors
+    - Context for timing-sensitive translations
+{f'11. Additional Context: {context}' if context else ''}
 
 Input {source_name} JSON:
 {formatted_json}
 
 Output {dest_lang} JSON (START WITH '{{' AND END WITH '}}'):"""
     return prompt
+
+
+def clean_translated_text(text):
+    """Clean translated text by removing duration comments and trimming."""
+    if not isinstance(text, str):
+        text = str(text)
+    return text.split('//')[0].strip()
 
 
 def translate_chunk(client, lines, converter, context="", stats_callback=None, chunk_id=0):
@@ -579,7 +601,7 @@ def translate_chunk(client, lines, converter, context="", stats_callback=None, c
             response = client.chat.completions.create(
                 model=LLM_MODEL,
                 messages=[{"role": "user", "content": prompt}],
-                temperature=0,
+                # temperature=0,
                 extra_body={"repetition_penalty": 1},
                 stream=True
             )
@@ -646,7 +668,9 @@ def translate_chunk(client, lines, converter, context="", stats_callback=None, c
                             e = int(match.group(2)) if match.group(2) else s
 
                             new_key = f"{s + base_idx}" if s == e else f"{s + base_idx}-{e + base_idx}"
-                            all_translated_data[new_key] = val
+                            # Clean the translated text to remove any // comments and trim
+                            all_translated_data[new_key] = clean_translated_text(
+                                val)
                             max_processed_idx = max(max_processed_idx, e)
 
                     if max_processed_idx > 0:
@@ -687,9 +711,31 @@ def parse_srt(content):
             index = lines[0]
             timestamp = lines[1]
             text = " ".join(lines[2:])
+
+            # Parse timestamps to calculate duration
+            try:
+                start_str, end_str = timestamp.split(' --> ')
+                start_time = _parse_srt_timestamp(start_str)
+                end_time = _parse_srt_timestamp(end_str)
+                duration = end_time - start_time
+            except:
+                duration = 0.0
+
             parsed.append(
-                {'index': index, 'timestamp': timestamp, 'text': text})
+                {'index': index, 'timestamp': timestamp, 'text': text, 'duration': duration})
     return parsed
+
+
+def _parse_srt_timestamp(timestamp_str):
+    """Parse SRT timestamp string to seconds."""
+    # Format: HH:MM:SS,mmm
+    parts = timestamp_str.strip().split(':')
+    hours = int(parts[0])
+    minutes = int(parts[1])
+    seconds_parts = parts[2].split(',')
+    seconds = int(seconds_parts[0])
+    milliseconds = int(seconds_parts[1]) if len(seconds_parts) > 1 else 0
+    return hours * 3600 + minutes * 60 + seconds + milliseconds / 1000.0
 
 
 def translate_srt(input_path, output_path, context="", stats_callback=None):
@@ -746,9 +792,13 @@ def translate_srt(input_path, output_path, context="", stats_callback=None):
     with ThreadPoolExecutor(max_workers=4) as executor:
         futures = []
         for i, chunk_blocks in enumerate(chunks_data):
-            texts = [b['text'] for b in chunk_blocks]
+            # Pass lines as dict with text and duration: {"text": "...", "duration": 1.2}
+            lines_with_duration = [
+                {"text": b['text'], "duration": b['duration']}
+                for b in chunk_blocks
+            ]
             futures.append(executor.submit(translate_chunk, client,
-                           texts, converter, context, wrapped_callback, i))
+                           lines_with_duration, converter, context, wrapped_callback, i))
 
         translated_results = [f.result() for f in futures]
 

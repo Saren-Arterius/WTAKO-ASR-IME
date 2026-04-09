@@ -430,7 +430,12 @@ class SRTGui(ctk.CTk, TkinterDnD.DnDWrapper if HAS_DND else object):
         source = self.source_lang.get()
         dest = self.dest_lang.get()
         context = self.context_entry.get()
-        sample_lines = ["こんにちは、元気ですか？"]
+        # Sample lines with duration info to show the new format in preview
+        sample_lines = [
+            {"text": "こんにちは、元気ですか？", "duration": 2.5},
+            {"text": "はい、大丈夫です。", "duration": 1.8},
+            {"text": "ありがとう。", "duration": 0.3}
+        ]
         prompt = srt.get_translation_prompt(
             source, dest, sample_lines, context)
         self.prompt_preview.configure(state="normal")
