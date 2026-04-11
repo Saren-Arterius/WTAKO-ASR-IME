@@ -39,7 +39,8 @@ DEFAULT_CONFIG = {
     "unload_models_after_use": False,
     "save_debug_srt": False,
     "save_origin_srt": True,
-    "enable_thinking": True
+    "enable_thinking": True,
+    "translation_chunk_size": 50
 }
 
 
@@ -71,7 +72,7 @@ class SRTGui(ctk.CTk, TkinterDnD.DnDWrapper if HAS_DND else object):
         ctk.set_appearance_mode(self.config.get("appearance_mode", "Dark"))
 
         self.title("WTAKO SRT Generator & Translator")
-        self.geometry("1000x800")
+        self.geometry("1000x900")
 
         self.video_files = self.config.get("video_files", [])
         self.is_processing = False
@@ -245,55 +246,61 @@ class SRTGui(ctk.CTk, TkinterDnD.DnDWrapper if HAS_DND else object):
         adv_tab = self.settings_tab.tab("Advanced")
         adv_tab.grid_columnconfigure(1, weight=1)
 
-        ctk.CTkLabel(adv_tab, text="Merge Duration (s):").grid(
+        ctk.CTkLabel(adv_tab, text="Min Speakers:").grid(
             row=0, column=0, padx=10, pady=5, sticky="w")
+        self.min_speakers = ctk.CTkEntry(adv_tab)
+        self.min_speakers.grid(row=0, column=1, padx=10, pady=5, sticky="w")
+
+        ctk.CTkLabel(adv_tab, text="Merge Duration (s):").grid(
+            row=1, column=0, padx=10, pady=5, sticky="w")
         self.merge_duration = ctk.CTkEntry(adv_tab)
-        self.merge_duration.grid(row=0, column=1, padx=10, pady=5, sticky="w")
+        self.merge_duration.grid(row=1, column=1, padx=10, pady=5, sticky="w")
 
         ctk.CTkLabel(adv_tab, text="Force Merge Duration (s):").grid(
-            row=1, column=0, padx=10, pady=5, sticky="w")
+            row=2, column=0, padx=10, pady=5, sticky="w")
         self.merge_duration_force = ctk.CTkEntry(adv_tab)
         self.merge_duration_force.grid(
-            row=1, column=1, padx=10, pady=5, sticky="w")
-
-        ctk.CTkLabel(adv_tab, text="Min Speakers:").grid(
-            row=2, column=0, padx=10, pady=5, sticky="w")
-        self.min_speakers = ctk.CTkEntry(adv_tab)
-        self.min_speakers.grid(row=2, column=1, padx=10, pady=5, sticky="w")
+            row=2, column=1, padx=10, pady=5, sticky="w")
 
         self.prompt_preview_label = ctk.CTkLabel(
             adv_tab, text="Prompt Preview:")
         self.prompt_preview_label.grid(
-            row=3, column=0, padx=10, pady=5, sticky="nw")
+            row=3, column=0, padx=10, pady=(20, 5), sticky="nw")
         self.prompt_preview = ctk.CTkTextbox(adv_tab, height=150)
         self.prompt_preview.grid(
-            row=3, column=1, padx=10, pady=5, sticky="nsew")
+            row=4, column=0, columnspan=2, padx=10, pady=5, sticky="nsew")
 
         self.update_preview_btn = ctk.CTkButton(
             adv_tab, text="Update Preview", command=self.update_prompt_preview)
         self.update_preview_btn.grid(
-            row=4, column=1, padx=10, pady=5, sticky="e")
+            row=5, column=1, padx=10, pady=(0, 10), sticky="e")
+
+        ctk.CTkLabel(adv_tab, text="Translation Chunk Size:").grid(
+            row=6, column=0, padx=10, pady=5, sticky="w")
+        self.translation_chunk_size = ctk.CTkEntry(adv_tab)
+        self.translation_chunk_size.grid(
+            row=6, column=1, padx=10, pady=5, sticky="w")
 
         self.save_debug_srt_var = ctk.BooleanVar(
             value=self.config.get("save_debug_srt", False))
         self.save_debug_srt_checkbox = ctk.CTkCheckBox(adv_tab, text="Save Debug SRT (Diarization)",
                                                        variable=self.save_debug_srt_var)
         self.save_debug_srt_checkbox.grid(
-            row=5, column=0, columnspan=2, padx=10, pady=5, sticky="w")
+            row=7, column=0, columnspan=2, padx=10, pady=5, sticky="w")
 
         self.save_origin_srt_var = ctk.BooleanVar(
             value=self.config.get("save_origin_srt", True))
         self.save_origin_srt_checkbox = ctk.CTkCheckBox(adv_tab, text="Save Original Language SRT",
                                                         variable=self.save_origin_srt_var)
         self.save_origin_srt_checkbox.grid(
-            row=6, column=0, columnspan=2, padx=10, pady=5, sticky="w")
+            row=8, column=0, columnspan=2, padx=10, pady=5, sticky="w")
 
         self.enable_thinking_var = ctk.BooleanVar(
             value=self.config.get("enable_thinking", True))
         self.enable_thinking_checkbox = ctk.CTkCheckBox(adv_tab, text="Enable Thinking (Slow)",
                                                         variable=self.enable_thinking_var)
         self.enable_thinking_checkbox.grid(
-            row=7, column=0, columnspan=2, padx=10, pady=5, sticky="w")
+            row=9, column=0, columnspan=2, padx=10, pady=5, sticky="w")
 
         # Status & Progress
         self.status_label = ctk.CTkLabel(
@@ -341,6 +348,8 @@ class SRTGui(ctk.CTk, TkinterDnD.DnDWrapper if HAS_DND else object):
         self.merge_duration_force.insert(
             0, str(self.config.get("merge_duration_force", 0.2)))
         self.min_speakers.insert(0, str(self.config.get("min_speakers", 0)))
+        self.translation_chunk_size.insert(
+            0, str(self.config.get("translation_chunk_size", 50)))
         self.hf_token.insert(0, self.config["HF_TOKEN"])
         self.context_entry.insert(0, self.config.get("context", ""))
         self.update_asr_visibility(self.asr_backend.get())
@@ -466,6 +475,7 @@ class SRTGui(ctk.CTk, TkinterDnD.DnDWrapper if HAS_DND else object):
                 "merge_duration": float(self.merge_duration.get()),
                 "merge_duration_force": float(self.merge_duration_force.get()),
                 "min_speakers": int(self.min_speakers.get()),
+                "translation_chunk_size": int(self.translation_chunk_size.get()),
                 "HF_TOKEN": self.hf_token.get(),
                 "use_diarization": self.use_diarization_var.get(),
                 "appearance_mode": self.appearance_mode_optionemenu.get(),
@@ -558,14 +568,32 @@ class SRTGui(ctk.CTk, TkinterDnD.DnDWrapper if HAS_DND else object):
             self.status_label.configure(
                 text_color=ctk.ThemeManager.theme["CTkLabel"]["text_color"])
 
-    def update_transcription_progress(self, completed, total):
-        progress = (completed / total) if total > 0 else 0
-        # ASR is 10% to 20% (10% total)
-        sub_progress = 0.1 + (progress * 0.1)
-        self.after(0, lambda: [
-            self.tps_label.configure(text=f"Fragment {completed}/{total}"),
-            self.sub_progress_bar.set(sub_progress)
-        ])
+    def update_transcription_progress(self, *args):
+        # Handle both transcription (completed, total) and translation (chunk_id, tokens, duration, translated_blocks, total_blocks, chunk_total_blocks) callbacks
+        if len(args) == 2:
+            # Transcription: (completed, total)
+            completed, total = args
+            progress = (completed / total) if total > 0 else 0
+            # ASR is 10% to 20% (10% total)
+            sub_progress = 0.1 + (progress * 0.1)
+            self.after(0, lambda: [
+                self.tps_label.configure(text=f"Fragment {completed}/{total}"),
+                self.sub_progress_bar.set(sub_progress)
+            ])
+        elif len(args) >= 5:
+            # Translation: (chunk_id, tokens, duration, translated_blocks, total_blocks, ...)
+            chunk_id, tokens, duration, translated_blocks, total_blocks = args[
+                0], args[1], args[2], args[3], args[4]
+            # Translation is 20% to 100% (80% total)
+            progress = (translated_blocks /
+                        total_blocks) if total_blocks > 0 else 0
+            sub_progress = 0.2 + (progress * 0.8)
+            tps = (tokens / duration) if duration > 0 else 0
+            self.after(0, lambda: [
+                self.tps_label.configure(
+                    text=f"{progress*100:.1f}% | {tps:.1f} tokens/s"),
+                self.sub_progress_bar.set(sub_progress)
+            ])
 
     def update_diarization_progress(self, step_name, completed, total):
         progress = (completed / total) if total > 0 else 0
@@ -583,12 +611,10 @@ class SRTGui(ctk.CTk, TkinterDnD.DnDWrapper if HAS_DND else object):
 
         total_tokens = sum(s[0] for s in self.chunk_stats.values())
         total_translated_blocks = sum(s[2] for s in self.chunk_stats.values())
+        total_duration = sum(s[1] for s in self.chunk_stats.values())
 
-        max_duration = max((s[1]
-                            for s in self.chunk_stats.values()), default=0)
-
-        if max_duration > 0:
-            combined_tps = total_tokens / max_duration
+        if total_duration > 0:
+            combined_tps = total_tokens / total_duration
             progress = (total_translated_blocks /
                         total_blocks) if total_blocks > 0 else 0
             # Translation is 20% to 100% (80% total)
@@ -660,6 +686,15 @@ class SRTGui(ctk.CTk, TkinterDnD.DnDWrapper if HAS_DND else object):
             srt.MERGE_DURATION = self.config["merge_duration"]
             srt.MERGE_DURATION_FORCE = self.config.get(
                 "merge_duration_force", 0.2)
+            srt.TRANSLATION_CHUNK_SIZE = self.config.get(
+                "translation_chunk_size", 50)
+            srt.USE_DIARIZATION = self.config["use_diarization"]
+            srt.MIN_SPEAKERS = self.config.get("min_speakers", 0)
+            srt.HF_TOKEN = self.config.get("HF_TOKEN", "")
+            srt.UNLOAD_MODELS_AFTER_USE = self.config.get(
+                "unload_models_after_use", False)
+            srt.SAVE_DEBUG_SRT = self.config.get("save_debug_srt", False)
+            srt.SAVE_ORIGIN_SRT = self.config.get("save_origin_srt", True)
             if self.config["HF_TOKEN"]:
                 os.environ["HF_TOKEN"] = self.config["HF_TOKEN"]
 
@@ -679,128 +714,29 @@ class SRTGui(ctk.CTk, TkinterDnD.DnDWrapper if HAS_DND else object):
 
                 self.update_status(f"Processing {i+1}/{total}: {base_name}")
 
-                source_srt = f"{base_path}.{srt.SOURCE_LANG}.srt"
+                stage_times = srt.process_video_file(
+                    video_file,
+                    context=context,
+                    skip_translation=self.config.get(
+                        "skip_translation", False),
+                    stats_callback=self.update_transcription_progress
+                )
 
-                video_start_time = time.perf_counter()
-                stage_times = {
-                    "extract": 0.0,
-                    "diarization_vad": 0.0,
-                    "transcribe": 0.0,
-                    "translate": 0.0
-                }
-
-                # 1. Extract
-                self.update_status(f"[{i+1}/{total}] Extracting audio...")
-                self.after(0, lambda: self.sub_progress_bar.set(0.02))
-                stage_start_time = time.perf_counter()
-                audio_bytes = srt.extract_audio(video_file)
-                stage_times["extract"] = time.perf_counter() - stage_start_time
-
-                # 2. Diarization / VAD
-                stage_start_time = time.perf_counter()
-                timestamps = None
-                if self.config["use_diarization"]:
-                    self.update_status(
-                        f"[{i+1}/{total}] Running Diarization...")
-                    self.after(0, lambda: self.sub_progress_bar.set(0.05))
-                    # run_diarization_community now returns (merged, raw)
-                    diarization_result = srt.run_diarization_community(
-                        audio_bytes,
-                        min_speakers=self.config.get("min_speakers"),
-                        stats_callback=self.update_diarization_progress
-                    )
-                    if diarization_result:
-                        timestamps, raw_timestamps = diarization_result
-                        # Save raw debug diarization SRT before merging
-                        if self.config.get("save_debug_srt", False):
-                            diarization_srt = f"{base_path}.debug.diarization.srt"
-                            with open(diarization_srt, 'w', encoding='utf-8') as f:
-                                for idx, seg in enumerate(raw_timestamps):
-                                    f.write(f"{idx+1}\n")
-                                    f.write(
-                                        f"{srt.format_timestamp(seg['start'] / 16000)} --> {srt.format_timestamp(seg['end'] / 16000)}\n")
-                                    speaker = seg.get('speaker', 'UNKNOWN')
-                                    f.write(
-                                        f"{speaker} (start: {seg['start']}, end: {seg['end']})\n\n")
-                    else:
-                        timestamps = None
-
-                if timestamps is None:
-                    self.update_status(
-                        f"[{i+1}/{total}] Running VAD...")
-                    self.after(0, lambda: self.sub_progress_bar.set(0.05))
-                    timestamps, wav_tensor = srt.get_vad_timestamps(
-                        audio_bytes)
-                else:
-                    # Convert bytes to tensor without loading Silero VAD
-                    audio_stream = io.BytesIO(audio_bytes)
-                    import wave
-                    import numpy as np
-                    with wave.open(audio_stream, 'rb') as wav_file:
-                        params = wav_file.getparams()
-                        frames = wav_file.readframes(params.nframes)
-                        audio_np = np.frombuffer(
-                            frames, dtype=np.int16).astype(np.float32) / 32768.0
-                        wav_tensor = torch.from_numpy(audio_np)
-
-                stage_times["diarization_vad"] = time.perf_counter() - \
-                    stage_start_time
-                self.after(0, lambda: self.sub_progress_bar.set(0.1))
-
-                # Unload Diarization/VAD models before transcription if requested
-                if self.unload_models_var.get():
-                    # This will also clear torch cache which helps VAD/Diarization memory
-                    srt.unload_models()
-
-                # 3. Transcribe
-                self.update_status(f"[{i+1}/{total}] Transcribing...")
-                self.after(0, lambda: self.tps_label.configure(text=""))
-                stage_start_time = time.perf_counter()
-                segments = srt.transcribe_fragments(
-                    wav_tensor, timestamps, context=context, stats_callback=self.update_transcription_progress)
-                srt.save_srt(segments, source_srt)
-                stage_times["transcribe"] = time.perf_counter() - \
-                    stage_start_time
-
-                # Unload ASR models before translation if requested
-                if self.unload_models_var.get():
-                    srt.unload_models()
-
-                # 4. Translate (optional)
                 if self.config.get("skip_translation", False):
-                    self.update_status(
-                        f"[{i+1}/{total}] Skipping translation (source SRT only)...")
-                    self.after(0, lambda: [
-                        self.tps_label.configure(text=""),
-                        self.sub_progress_bar.set(1.0)
-                    ])
-                    stage_times["translate"] = 0.0
+                    self.after(0, lambda: self.sub_progress_bar.set(1.0))
                 else:
-                    self.update_status(f"[{i+1}/{total}] Translating...")
                     self.chunk_stats = {}
                     self.after(0, lambda: self.tps_label.configure(text=""))
-                    stage_start_time = time.perf_counter()
-                    srt.translate_srt(source_srt, dest_srt, context,
-                                      stats_callback=self.update_tps)
-                    stage_times["translate"] = time.perf_counter() - \
-                        stage_start_time
+                    self.after(0, lambda: self.sub_progress_bar.set(1.0))
 
-                    # Delete original SRT if not requested
-                    if not self.config.get("save_origin_srt", True):
-                        try:
-                            if os.path.exists(source_srt):
-                                os.remove(source_srt)
-                        except Exception as e:
-                            print(f"Failed to remove original SRT: {e}")
-
-                total_video_time = time.perf_counter() - video_start_time
                 print(f"[Timing] {base_name}")
                 print(f"  Extract: {stage_times['extract']:.2f}s")
                 print(
                     f"  Diarization / VAD: {stage_times['diarization_vad']:.2f}s")
                 print(f"  Transcribe: {stage_times['transcribe']:.2f}s")
                 print(f"  Translate: {stage_times['translate']:.2f}s")
-                print(f"  Overall (this video): {total_video_time:.2f}s")
+                print(
+                    f"  Overall (this video): {sum(stage_times.values()):.2f}s")
 
                 self.progress_bar.set((i + 1) / total)
 
