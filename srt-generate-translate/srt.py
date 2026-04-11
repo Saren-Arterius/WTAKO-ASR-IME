@@ -12,9 +12,10 @@ import io
 import base64
 import argparse
 import re
-from openai import OpenAI
+from openai import OpenAI, APITimeoutError
 from concurrent.futures import ThreadPoolExecutor
 from pyannote.audio import Pipeline
+from collections import Counter
 
 ENABLE_TRANSCRIBE_CONTEXT = False
 # Configuration Defaults
@@ -35,6 +36,8 @@ UNLOAD_MODELS_AFTER_USE = False
 SAVE_DEBUG_SRT = False
 SAVE_ORIGIN_SRT = True
 ENABLE_THINKING = True
+MAX_VIDEO_DURATION = 25 * 60  # 25 minutes in seconds
+TRANSLATION_CHUNK_SIZE = 50  # Lines per translation chunk
 
 _sensevoice_recognizer = None
 _qwen_asr_model = None
@@ -98,6 +101,33 @@ def get_sensevoice_recognizer():
             provider="cpu",
         )
     return _sensevoice_recognizer
+
+
+def get_video_duration(video_path):
+    """Get video duration in seconds using ffprobe."""
+    cmd = [
+        'ffprobe', '-v', 'error', '-show_entries', 'format=duration',
+        '-of', 'default=noprint_wrappers=1:nokey=1', video_path
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    try:
+        return float(result.stdout.strip())
+    except (ValueError, IndexError):
+        return 0.0
+
+
+def extract_audio_segment(video_path, start_time, duration):
+    """Extract a specific time segment from video as 16kHz mono wav."""
+    cmd = [
+        'ffmpeg', '-y', '-i', video_path,
+        '-ss', str(start_time), '-t', str(duration),
+        '-vn', '-acodec', 'pcm_s16le', '-ar', '16000', '-ac', '1',
+        '-f', 'wav', 'pipe:1'
+    ]
+    process = subprocess.Popen(
+        cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    audio_data, _ = process.communicate()
+    return audio_data
 
 
 def extract_audio(video_path):
@@ -395,67 +425,80 @@ def transcribe_one(client, i, ts, wav_tensor, total, context=""):
         wav_file.writeframes((fragment * 32767).astype(np.int16).tobytes())
     audio_b64 = base64.b64encode(output.getvalue()).decode("utf-8")
 
-    try:
-        messages = []
-        context_text = context.strip()
+    # Retry indefinitely only on connection timeout errors
+    while True:
+        try:
+            messages = []
+            context_text = context.strip()
 
-        if ENABLE_TRANSCRIBE_CONTEXT and context_text:
-            print(
-                f"Transcribing fragment w/ctx {i+1}/{total} ({ts['start']/16000:.2f}s)...")
-            messages.append({
-                "role": "system",
-                "content": (
-                    "Use this context to improve transcription accuracy for names, tone, and domain terms: "
-                    f"{context_text}"
-                )
-            })
-        else:
-            print(
-                f"Transcribing fragment {i+1}/{total} ({ts['start']/16000:.2f}s)...")
+            start_sec = ts['start'] / 16000
+            end_sec = ts['end'] / 16000
+            duration = end_sec - start_sec
+            start_mmss = f"{int(start_sec // 60):02d}:{int(start_sec % 60):02d}"
+            end_mmss = f"{int(end_sec // 60):02d}:{int(end_sec % 60):02d}"
 
-        messages.append({
-            "role": "user",
-            "content": [
-                {"type": "input_audio", "input_audio": {
-                    "data": audio_b64, "format": "wav"}}
-            ]
-        })
-
-        # Use streaming to enforce a total timeout including response generation time
-        response = client.chat.completions.create(
-            model=ASR_MODEL,
-            messages=messages,
-            extra_body={
-                "chat_template_kwargs": {"language": SOURCE_LANG},
-                "repetition_penalty": 1.5
-            },
-            stream=True,
-            timeout=15.0
-        )
-
-        text = ""
-        start_time = time.time()
-        for chunk in response:
-            if time.time() - start_time > 15.0:
+            if ENABLE_TRANSCRIBE_CONTEXT and context_text:
                 print(
-                    f"Warning: Segment {i+1} ASR request timed out during generation (>15s).")
-                break
-            if chunk.choices[0].delta.content:
-                text += chunk.choices[0].delta.content
-        if '<asr_text>' in text:
-            text = text.split('<asr_text>')[1].strip()
-        text = clean_transcribed_text(i, text.strip())
-        return build_transcription_result(i, ts, text)
-    except Exception as e:
-        print(f"Error transcribing fragment {i}: {e}")
-        # If timeout or other error, return empty string as requested
-        return build_transcription_result(i, ts, "")
+                    f"Transcribing fragment w/ctx {i+1}/{total} [{start_mmss}-{end_mmss}] ({duration:.2f}s)...")
+                messages.append({
+                    "role": "system",
+                    "content": (
+                        "Use this context to improve transcription accuracy for names, tone, and domain terms: "
+                        f"{context_text}"
+                    )
+                })
+            else:
+                print(
+                    f"Transcribing fragment {i+1}/{total} [{start_mmss}-{end_mmss}] ({duration:.2f}s)...")
+
+            messages.append({
+                "role": "user",
+                "content": [
+                    {"type": "input_audio", "input_audio": {
+                        "data": audio_b64, "format": "wav"}}
+                ]
+            })
+
+            # Use streaming to enforce a total timeout including response generation time
+            response = client.chat.completions.create(
+                model=ASR_MODEL,
+                messages=messages,
+                extra_body={
+                    "chat_template_kwargs": {"language": SOURCE_LANG},
+                    "repetition_penalty": 1.5
+                },
+                stream=True,
+                timeout=15.0
+            )
+
+            text = ""
+            start_time = time.time()
+            for chunk in response:
+                if time.time() - start_time > 15.0:
+                    print(
+                        f"Warning: Segment {i+1} ASR request timed out during generation (>15s).")
+                    break
+                if chunk.choices[0].delta.content:
+                    text += chunk.choices[0].delta.content
+            if '<asr_text>' in text:
+                text = text.split('<asr_text>')[1].strip()
+            text = clean_transcribed_text(i, text.strip())
+            return build_transcription_result(i, ts, text)
+        except APITimeoutError as e:
+            print(
+                f"Connection timeout for fragment {i}: {e}. Retrying indefinitely...")
+            time.sleep(1)
+            continue
+        except Exception as e:
+            print(f"Error transcribing fragment {i}: {e}")
+            # Non-timeout errors return empty string
+            return build_transcription_result(i, ts, "")
 
 
 def transcribe_fragments(wav_tensor, timestamps, context="", stats_callback=None):
-    # Cap each segment to be 15 seconds max.
-    # If a segment is longer than 15 seconds, it's likely glitched; crop it to 15s.
-    MAX_SEGMENT_DURATION_S = 15.0
+    # Cap each segment to be 60 seconds max.
+    # If a segment is longer than 60 seconds, it's likely glitched; crop it to 60s.
+    MAX_SEGMENT_DURATION_S = 60.0
     MAX_SEGMENT_SAMPLES = int(MAX_SEGMENT_DURATION_S * 16000)
 
     processed_timestamps = []
@@ -465,7 +508,7 @@ def transcribe_fragments(wav_tensor, timestamps, context="", stats_callback=None
         duration_samples = end - start
         if duration_samples > MAX_SEGMENT_SAMPLES:
             print(
-                f"Warning: Segment at {start/16000:.2f}s is {duration_samples/16000:.2f}s long (exceeds 15s). Cropping to 15s.")
+                f"Warning: Segment at {start/16000:.2f}s is {duration_samples/16000:.2f}s long (exceeds 60s). Cropping to 60s.")
             ts['end'] = start + MAX_SEGMENT_SAMPLES
         processed_timestamps.append(ts)
 
@@ -517,6 +560,164 @@ def save_srt(segments, output_path):
             f.write(
                 f"{format_timestamp(seg['start'])} --> {format_timestamp(seg['end'])}\n")
             f.write(f"{seg['text']}\n\n")
+
+
+def process_video_file(video_file, context="", skip_translation=False, stats_callback=None):
+    """
+    Process a video file through the entire pipeline:
+    - Extract audio
+    - Run VAD/diarization
+    - Transcribe
+    - Translate (optional)
+
+    Handles video segmentation for videos > 25 minutes.
+
+    Returns: dict with timings for each stage
+    """
+    import time
+    timings = {
+        "extract": 0.0,
+        "diarization_vad": 0.0,
+        "transcribe": 0.0,
+        "translate": 0.0
+    }
+    base_path = os.path.splitext(video_file)[0]
+    source_srt = f"{base_path}.{SOURCE_LANG}.srt"
+    dest_srt = f"{base_path}.translated.srt"
+
+    # Check if source SRT already exists - skip extraction, VAD, and transcription
+    skip_pipeline = os.path.exists(source_srt)
+    if skip_pipeline:
+        print(f"[Skip] Source SRT already exists: {source_srt}")
+
+    # 1. Extract audio (skip if source SRT exists)
+    if not skip_pipeline:
+        start_time = time.perf_counter()
+        audio_bytes = extract_audio(video_file)
+        timings["extract"] = time.perf_counter() - start_time
+
+        # 2. VAD / Diarization - handles segmentation internally
+        start_time = time.perf_counter()
+        segments = _process_audio_with_segmentation(
+            audio_bytes, video_file, stats_callback)
+        timings["diarization_vad"] = time.perf_counter() - start_time
+
+        if UNLOAD_MODELS_AFTER_USE:
+            unload_models()
+
+        # 3. Transcribe
+        start_time = time.perf_counter()
+        save_srt(segments, source_srt)
+        timings["transcribe"] = time.perf_counter() - start_time
+        print(f"[Saved] Source SRT: {source_srt}")
+
+        if UNLOAD_MODELS_AFTER_USE:
+            unload_models()
+    else:
+        # Load existing segments from source SRT
+        with open(source_srt, 'r', encoding='utf-8') as f:
+            segments = parse_srt(f.read())
+
+    # 4. Translate (optional)
+    if not skip_translation:
+        start_time = time.perf_counter()
+        translate_srt(source_srt, dest_srt, context,
+                      stats_callback=stats_callback)
+        timings["translate"] = time.perf_counter() - start_time
+
+        if not SAVE_ORIGIN_SRT:
+            try:
+                if os.path.exists(source_srt):
+                    os.remove(source_srt)
+            except Exception as e:
+                print(f"Failed to remove original SRT: {e}")
+
+    return timings
+
+
+def _process_audio_with_segmentation(audio_bytes, video_file, stats_callback=None):
+    """
+    Process audio through VAD/diarization and transcription.
+    If video was split into segments, processes each and combines results.
+    Returns segments with adjusted timestamps.
+    """
+    duration = get_video_duration(video_file)
+    print(
+        f"Video duration: {duration:.2f} seconds ({duration/60:.2f} minutes)")
+
+    if duration <= MAX_VIDEO_DURATION:
+        return _process_single_segment(audio_bytes, video_file, 0, stats_callback)
+    else:
+        print(
+            f"Video too long ({duration/60:.2f} min > 25 min). Splitting into {MAX_VIDEO_DURATION/60:.0f}-minute segments...")
+        all_segments = []
+        num_segments = int(
+            (duration + MAX_VIDEO_DURATION - 1) // MAX_VIDEO_DURATION)
+
+        for i in range(num_segments):
+            start_time = i * MAX_VIDEO_DURATION
+            remaining = duration - start_time
+            segment_duration = min(MAX_VIDEO_DURATION, remaining)
+
+            print(
+                f"\nProcessing segment {i+1}/{num_segments}: {start_time/60:.1f}min - {(start_time+segment_duration)/60:.1f}min")
+            audio_segment = extract_audio_segment(
+                video_file, start_time, segment_duration)
+            segment_results = _process_single_segment(
+                audio_segment, video_file, start_time, stats_callback)
+            all_segments.extend(segment_results)
+
+        return all_segments
+
+
+def _process_single_segment(audio_bytes, video_file, time_offset, stats_callback=None):
+    """Process a single audio segment through VAD/diarization and transcription."""
+    timestamps = None
+
+    if USE_DIARIZATION:
+        if not HF_TOKEN:
+            print("Warning: HF_TOKEN not set. Skipping diarization.")
+        else:
+            diarization_result = run_diarization_community(
+                audio_bytes,
+                min_speakers=MIN_SPEAKERS
+            )
+            if diarization_result:
+                timestamps, raw_timestamps = diarization_result
+                if SAVE_DEBUG_SRT:
+                    base_path = os.path.splitext(video_file)[0]
+                    diarization_srt = f"{base_path}.debug.diarization.srt"
+                    with open(diarization_srt, 'w', encoding='utf-8') as f:
+                        for idx, seg in enumerate(raw_timestamps):
+                            f.write(f"{idx+1}\n")
+                            f.write(
+                                f"{format_timestamp(seg['start'] / 16000)} --> {format_timestamp(seg['end'] / 16000)}\n")
+                            speaker = seg.get('speaker', 'UNKNOWN')
+                            f.write(
+                                f"{speaker} (start: {seg['start']}, end: {seg['end']})\n\n")
+                    print(f"Saved debug diarization to {diarization_srt}")
+
+    if timestamps is None:
+        print("Running VAD...")
+        timestamps, wav_tensor = get_vad_timestamps(audio_bytes)
+    else:
+        audio_stream = io.BytesIO(audio_bytes)
+        with wave.open(audio_stream, 'rb') as wav_file:
+            params = wav_file.getparams()
+            frames = wav_file.readframes(params.nframes)
+            audio_np = np.frombuffer(
+                frames, dtype=np.int16).astype(np.float32) / 32768.0
+            wav_tensor = torch.from_numpy(audio_np)
+
+    segments = transcribe_fragments(
+        wav_tensor, timestamps, context="", stats_callback=stats_callback)
+
+    # Adjust timestamps by the time offset
+    for seg in segments:
+        seg['start'] += time_offset
+        seg['end'] += time_offset
+
+    return segments
 
 
 def get_translation_prompt(source_lang, dest_lang, lines, context=""):
@@ -627,7 +828,7 @@ def translate_chunk(client, lines, converter, context="", stats_callback=None, c
             extra_body = {"repetition_penalty": 1}
             if not ENABLE_THINKING:
                 extra_body["chat_template_kwargs"] = {"enable_thinking": False}
-            response = client.chat.completions.create(
+            stream = client.chat.completions.create(
                 model=LLM_MODEL,
                 messages=[{"role": "user", "content": prompt}],
                 extra_body=extra_body,
@@ -639,7 +840,7 @@ def translate_chunk(client, lines, converter, context="", stats_callback=None, c
             token_count = 0
             interrupted = False
 
-            for chunk in response:
+            for chunk in stream:
                 if chunk.choices[0].delta.content:
                     if start_time is None:
                         start_time = time.time()
@@ -662,6 +863,7 @@ def translate_chunk(client, lines, converter, context="", stats_callback=None, c
                         # For stats, we show progress of what we have so far
                         stats_callback(chunk_id, token_count,
                                        time.time() - start_time, full_content)
+            stream.response.close()
 
             if interrupted:
                 # Keep as-is and recover completed key/value pairs from partial output.
@@ -779,10 +981,10 @@ def translate_srt(input_path, output_path, context="", stats_callback=None):
         _chunk_stats[chunk_id] = (tokens, duration, translated_blocks)
         total_tokens = sum(s[0] for s in _chunk_stats.values())
         total_translated = sum(s[2] for s in _chunk_stats.values())
-        max_duration = max((s[1] for s in _chunk_stats.values()), default=0)
+        total_duration = sum(s[1] for s in _chunk_stats.values())
 
-        if max_duration > 0:
-            tps = total_tokens / max_duration
+        if total_duration > 0:
+            tps = total_tokens / total_duration
             progress = (total_translated / total_blocks) * \
                 100 if total_blocks > 0 else 0
             sys.stdout.write(
@@ -800,9 +1002,8 @@ def translate_srt(input_path, output_path, context="", stats_callback=None):
     if total_blocks == 0:
         return
 
-    # Split blocks into 4 chunks
-    num_chunks = 4
-    chunk_size = (total_blocks + num_chunks - 1) // num_chunks
+    # Split blocks into chunks of TRANSLATION_CHUNK_SIZE lines
+    chunk_size = TRANSLATION_CHUNK_SIZE
     chunks_data = []
     for i in range(0, total_blocks, chunk_size):
         chunks_data.append(parsed_blocks[i:i + chunk_size])
@@ -812,12 +1013,18 @@ def translate_srt(input_path, output_path, context="", stats_callback=None):
     converter = opencc.OpenCC('s2t')
 
     # Wrapper for stats_callback to include total_blocks
+    start_time = time.time()
+    tokens_cnt = Counter()
+    translated_lines_cnt = Counter()
+
     def wrapped_callback(chunk_id, tokens, duration, chunk_content):
         # Count how many lines are in the current translated content
         translated_lines = len(
             [l for l in chunk_content.split('\n') if l.strip()])
-        effective_callback(chunk_id, tokens, duration,
-                           translated_lines, total_blocks, len(chunks_data[chunk_id]))
+        tokens_cnt[chunk_id] = tokens
+        translated_lines_cnt[chunk_id] = translated_lines
+        effective_callback(0, sum(tokens_cnt.values()), time.time() - start_time,
+                           sum(translated_lines_cnt.values()), total_blocks, len(chunks_data[chunk_id]))
 
     with ThreadPoolExecutor(max_workers=4) as executor:
         futures = []
@@ -973,72 +1180,13 @@ def main():
             continue
 
         print(f"\nProcessing: {video_file}")
-
-        audio_bytes = extract_audio(video_file)
-
-        # 2. Diarization / VAD
-        timestamps = None
-        if USE_DIARIZATION:
-            if not HF_TOKEN:
-                print("Warning: HF_TOKEN not set. Skipping diarization.")
-            else:
-                diarization_result = run_diarization_community(
-                    audio_bytes,
-                    min_speakers=MIN_SPEAKERS
-                )
-                if diarization_result:
-                    timestamps, raw_timestamps = diarization_result
-                    if SAVE_DEBUG_SRT:
-                        diarization_srt = f"{base_path}.debug.diarization.srt"
-                        with open(diarization_srt, 'w', encoding='utf-8') as f:
-                            for idx, seg in enumerate(raw_timestamps):
-                                f.write(f"{idx+1}\n")
-                                f.write(
-                                    f"{format_timestamp(seg['start'] / 16000)} --> {format_timestamp(seg['end'] / 16000)}\n")
-                                speaker = seg.get('speaker', 'UNKNOWN')
-                                f.write(
-                                    f"{speaker} (start: {seg['start']}, end: {seg['end']})\n\n")
-                        print(f"Saved debug diarization to {diarization_srt}")
-
-        if timestamps is None:
-            print("Running VAD...")
-            timestamps, wav_tensor = get_vad_timestamps(audio_bytes)
-        else:
-            # Convert bytes to tensor
-            audio_stream = io.BytesIO(audio_bytes)
-            with wave.open(audio_stream, 'rb') as wav_file:
-                params = wav_file.getparams()
-                frames = wav_file.readframes(params.nframes)
-                audio_np = np.frombuffer(
-                    frames, dtype=np.int16).astype(np.float32) / 32768.0
-                wav_tensor = torch.from_numpy(audio_np)
-
-        if UNLOAD_MODELS_AFTER_USE:
-            unload_models()
-
-        # 3. Transcribe
-        segments = transcribe_fragments(
-            wav_tensor, timestamps, context=context)
-
-        source_srt = f"{base_path}.{SOURCE_LANG}.srt"
-        dest_srt = f"{base_path}.translated.srt"
-
-        save_srt(segments, source_srt)
-        print(f"Saved {SOURCE_LANG} subtitles to {source_srt}")
-
-        if UNLOAD_MODELS_AFTER_USE:
-            unload_models()
-
-        # 4. Translate
-        translate_srt(source_srt, dest_srt, context)
-        print(f"Saved {DEST_LANG} subtitles to {dest_srt}")
-
-        if not SAVE_ORIGIN_SRT:
-            try:
-                if os.path.exists(source_srt):
-                    os.remove(source_srt)
-            except Exception as e:
-                print(f"Failed to remove original SRT: {e}")
+        timings = process_video_file(
+            video_file, context=context, skip_translation=False)
+        print(f"  Extract: {timings['extract']:.2f}s")
+        print(f"  Diarization / VAD: {timings['diarization_vad']:.2f}s")
+        print(f"  Transcribe: {timings['transcribe']:.2f}s")
+        print(f"  Translate: {timings['translate']:.2f}s")
+        print(f"  Overall: {sum(timings.values()):.2f}s")
 
     unload_models()
 
