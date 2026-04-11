@@ -34,6 +34,7 @@ MIN_SPEAKERS = 0
 UNLOAD_MODELS_AFTER_USE = False
 SAVE_DEBUG_SRT = False
 SAVE_ORIGIN_SRT = True
+ENABLE_THINKING = True
 
 _sensevoice_recognizer = None
 _qwen_asr_model = None
@@ -623,11 +624,13 @@ def translate_chunk(client, lines, converter, context="", stats_callback=None, c
         # To keep it simple, we'll let get_translation_prompt use 1..N and we map them back.
 
         try:
+            extra_body = {"repetition_penalty": 1}
+            if not ENABLE_THINKING:
+                extra_body["chat_template_kwargs"] = {"enable_thinking": False}
             response = client.chat.completions.create(
                 model=LLM_MODEL,
                 messages=[{"role": "user", "content": prompt}],
-                # temperature=0,
-                extra_body={"repetition_penalty": 1},
+                extra_body=extra_body,
                 stream=True
             )
 

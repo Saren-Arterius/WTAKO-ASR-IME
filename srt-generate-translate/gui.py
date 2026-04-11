@@ -38,7 +38,8 @@ DEFAULT_CONFIG = {
     "context": "",
     "unload_models_after_use": False,
     "save_debug_srt": False,
-    "save_origin_srt": True
+    "save_origin_srt": True,
+    "enable_thinking": True
 }
 
 
@@ -287,6 +288,13 @@ class SRTGui(ctk.CTk, TkinterDnD.DnDWrapper if HAS_DND else object):
         self.save_origin_srt_checkbox.grid(
             row=6, column=0, columnspan=2, padx=10, pady=5, sticky="w")
 
+        self.enable_thinking_var = ctk.BooleanVar(
+            value=self.config.get("enable_thinking", True))
+        self.enable_thinking_checkbox = ctk.CTkCheckBox(adv_tab, text="Enable Thinking (Slow)",
+                                                        variable=self.enable_thinking_var)
+        self.enable_thinking_checkbox.grid(
+            row=7, column=0, columnspan=2, padx=10, pady=5, sticky="w")
+
         # Status & Progress
         self.status_label = ctk.CTkLabel(
             self.main_frame, text="Status: Ready")
@@ -465,7 +473,8 @@ class SRTGui(ctk.CTk, TkinterDnD.DnDWrapper if HAS_DND else object):
                 "context": self.context_entry.get(),
                 "unload_models_after_use": self.unload_models_var.get(),
                 "save_debug_srt": self.save_debug_srt_var.get(),
-                "save_origin_srt": self.save_origin_srt_var.get()
+                "save_origin_srt": self.save_origin_srt_var.get(),
+                "enable_thinking": self.enable_thinking_var.get()
             })
             save_config(self.config)
             self.update_status("Configuration saved", "green")
@@ -647,6 +656,7 @@ class SRTGui(ctk.CTk, TkinterDnD.DnDWrapper if HAS_DND else object):
             srt.LLM_API_URL = self.config["LLM_API_URL"]
             srt.LLM_MODEL = self.config["LLM_MODEL"]
             srt.LLM_API_KEY = self.config.get("LLM_API_KEY", "")
+            srt.ENABLE_THINKING = self.config.get("enable_thinking", True)
             srt.MERGE_DURATION = self.config["merge_duration"]
             srt.MERGE_DURATION_FORCE = self.config.get(
                 "merge_duration_force", 0.2)
