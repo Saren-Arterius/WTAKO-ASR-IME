@@ -10,11 +10,6 @@ from email.parser import BytesParser
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import argparse
 
-from backends.glm_backend import GLMBackend
-from backends.sensevoice_backend import SenseVoiceBackend
-from backends.whisper_backend import WhisperBackend
-from backends.qwen_asr_backend import QwenASRBackend
-from backends.qwen_asr_backend_vllm import QwenASRBackendVLLM
 
 
 class ASRServer:
@@ -24,14 +19,19 @@ class ASRServer:
         self.enable_opencc = enable_opencc
         self.enable_extra_replace = enable_extra_replace
         if backend_type == "glm":
+            from backends.glm_backend import GLMBackend
             self.backend = GLMBackend(config=self.config)
         elif backend_type == "sensevoice" or backend_type == "sherpa-onnx/sense-voice":
+            from backends.sensevoice_backend import SenseVoiceBackend
             self.backend = SenseVoiceBackend(config=self.config)
         elif backend_type == "whisper":
+            from backends.whisper_backend import WhisperBackend
             self.backend = WhisperBackend(config=self.config)
         elif backend_type == "qwen" or backend_type == "qwen":
+            from backends.qwen_asr_backend import QwenASRBackend
             self.backend = QwenASRBackend(config=self.config)
         elif backend_type == "qwen_vllm":
+            from backends.qwen_asr_backend_vllm import QwenASRBackendVLLM
             self.backend = QwenASRBackendVLLM(config=self.config)
         else:
             raise ValueError(f"Unknown backend type: {backend_type}")
